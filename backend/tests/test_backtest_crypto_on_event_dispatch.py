@@ -120,6 +120,31 @@ class _DetectAsyncOnlyCryptoStrategy(BaseStrategy):
         return out
 
 
+class _CrashingOnEventCryptoStrategy(BaseStrategy):
+    """Silent-failure shape: on_event raises on every dispatch — e.g. a
+    wrong-arity create_opportunity() call.  The replay must NOT return a
+    bare empty list indistinguishable from "strategy found nothing"; it
+    must report the failures in stats and log the first traceback."""
+
+    strategy_type = "unit_crypto_crashing"
+    name = "crashing on_event"
+    description = "unit"
+    subscriptions = [EventType.CRYPTO_UPDATE]
+
+    async def on_event(self, event):
+        raise TypeError("create_opportunity() got an unexpected keyword argument 'bad_kwarg'")
+
+
+class _BareCrypto(BaseStrategy):
+    """A crypto strategy with neither detect nor on_event override — the
+    'nothing to replay' guard returns before any work."""
+
+    strategy_type = "unit_bare_crypto"
+    name = "bare"
+    description = "unit"
+    subscriptions = [EventType.CRYPTO_UPDATE]
+
+
 class _PlainScannerStrategy(BaseStrategy):
     """A scanner strategy (overrides detect only, no on_event) — the negative
     case for the on_event-override detector."""
@@ -162,7 +187,7 @@ async def _run_crypto_replay(monkeypatch, strategy, events_per_tick: dict[int, l
 
     monkeypatch.setattr(strategy_backtester, "_replay_bus_events_into_tick_grid", _stub_bus)
 
-    return await strategy_backtester._replay_discover_opportunities(
+    opps, _stats = await strategy_backtester._replay_discover_opportunities(
         strategy=strategy,
         slug=strategy.strategy_type,
         start_dt=start,
@@ -170,6 +195,7 @@ async def _run_crypto_replay(monkeypatch, strategy, events_per_tick: dict[int, l
         sample_interval_seconds=600,
         max_ticks=12,
     )
+    return opps, _stats
 
 
 # ── _has_custom_on_event ─────────────────────────────────────────────────────
@@ -233,7 +259,7 @@ async def test_crypto_dispatches_via_on_event_not_detect(monkeypatch):
     """Bug 1: a crypto strategy overriding BOTH on_event and detect runs
     on_event in backtest (matching live) — NOT detect."""
     strat = _OnEventWithDetectCryptoStrategy()
-    opps = await _run_crypto_replay(monkeypatch, strat, {1: [[{"id": "M1"}]]})
+    opps, _ = await _run_crypto_replay(monkeypatch, strat, {1: [[{"id": "M1"}]]})
 
     assert len(opps) > 0
     ids = {o.event_id for o in opps}
@@ -247,7 +273,7 @@ async def test_crypto_on_event_no_detect_now_runs(monkeypatch):
     the 'nothing to replay' guard and fire via on_event (it was silently skipped
     before the guard admitted on_event-driven strategies)."""
     strat = _OnEventNoDetectCryptoStrategy()
-    opps = await _run_crypto_replay(monkeypatch, strat, {1: [[{"id": "M2"}]]})
+    opps, _ = await _run_crypto_replay(monkeypatch, strat, {1: [[{"id": "M2"}]]})
 
     assert len(opps) > 0
     assert {o.event_id for o in opps} == {"M2"}
@@ -258,7 +284,7 @@ async def test_crypto_detect_async_only_keeps_detect_path(monkeypatch):
     """Safety: a CRYPTO_UPDATE strategy overriding ONLY detect_async (no on_event
     — the bonereaper shape) keeps the detect path, NOT rerouted to on_event."""
     strat = _DetectAsyncOnlyCryptoStrategy()
-    opps = await _run_crypto_replay(monkeypatch, strat, {1: [[{"id": "M3"}]]})
+    opps, _ = await _run_crypto_replay(monkeypatch, strat, {1: [[{"id": "M3"}]]})
 
     assert strat.detect_async_calls > 0, "detect_async path was bypassed — bonereaper would break"
     assert {o.event_id for o in opps} == {"M3"}
@@ -270,9 +296,59 @@ async def test_crypto_on_event_aggregates_multiple_dispatches_per_tick(monkeypat
     through on_event (live processes one dispatch per event; stateful strategies
     must see every dispatch) and their opportunities aggregate."""
     strat = _OnEventNoDetectCryptoStrategy()
-    opps = await _run_crypto_replay(monkeypatch, strat, {1: [[{"id": "E1"}], [{"id": "E2"}]]})
+    opps, _ = await _run_crypto_replay(monkeypatch, strat, {1: [[{"id": "E1"}], [{"id": "E2"}]]})
 
     assert {o.event_id for o in opps} == {"E1", "E2"}
+
+
+@pytest.mark.asyncio
+async def test_crashing_strategy_surfaces_failures_not_silent_empty(monkeypatch, caplog):
+    """Silent-failure regression: when detect()/on_event() raises on every
+    dispatched tick, the replay must report it (stats.failures ==
+    stats.dispatched, first_error carries the exception, first failure
+    logged with traceback) instead of an empty list that reads as "the
+    strategy found no edge"."""
+    import logging
+
+    strat = _CrashingOnEventCryptoStrategy()
+    with caplog.at_level(logging.ERROR, logger="services.strategy_backtester"):
+        opps, stats = await _run_crypto_replay(
+            monkeypatch, strat, {1: [[{"id": "C1"}]], 2: [[{"id": "C2"}]]}
+        )
+
+    assert opps == []
+    assert stats["dispatched"] == 2
+    assert stats["failures"] == 2
+    assert stats["first_error"] is not None
+    assert "TypeError" in stats["first_error"]
+    assert "bad_kwarg" in stats["first_error"]
+    assert any(
+        "raised at tick" in r.getMessage() and r.exc_info for r in caplog.records
+    ), "first detect()/on_event() failure was not logged with its traceback"
+
+
+@pytest.mark.asyncio
+async def test_no_detect_no_on_event_strategy_keeps_tuple_return(monkeypatch):
+    """Early-return 1 ('nothing to replay' guard: no detect, no on_event)
+    must return the (opps, stats) tuple — callers unpack two values, and a
+    bare ``[]`` here raises ValueError in every caller."""
+    opps, stats = await _run_crypto_replay(monkeypatch, _BareCrypto(), {})
+
+    assert opps == []
+    assert stats["dispatched"] == 0
+    assert stats["failures"] == 0
+    assert stats["first_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_no_catalog_book_strategy_keeps_tuple_return(monkeypatch):
+    """Early-return 2 (book-driven strategy, empty catalog) must return the
+    (opps, stats) tuple for the same unpacking reason."""
+    opps, stats = await _run_crypto_replay(monkeypatch, _PlainScannerStrategy(), {})
+
+    assert opps == []
+    assert stats["dispatched"] == 0
+    assert stats["failures"] == 0
 
 
 # ── universal detect(): base on_event routes CRYPTO_UPDATE -> detect() (LIVE) ──
@@ -297,12 +373,6 @@ async def test_base_on_event_routes_crypto_update_to_detect():
 async def test_base_on_event_crypto_without_detect_returns_empty():
     """A crypto strategy with neither detect nor on_event override still yields []
     (base detect() returns []) — the universal routing doesn't fabricate opps."""
-
-    class _BareCrypto(BaseStrategy):
-        strategy_type = "unit_bare_crypto"
-        name = "bare"
-        description = "unit"
-        subscriptions = [EventType.CRYPTO_UPDATE]
 
     ts = datetime(2026, 5, 1, 0, 10, 0, tzinfo=timezone.utc)
     opps = await _BareCrypto().on_event(_crypto_event([{"id": "Q"}], ts))

@@ -882,7 +882,7 @@ async def test_replay_discover_feeds_wallet_events_to_event_driven_strategy(monk
         scope_cfg={"individual_wallets": ["0xtracked"]}
     )
 
-    opps = await strategy_backtester._replay_discover_opportunities(
+    opps, _ = await strategy_backtester._replay_discover_opportunities(
         strategy=strategy,
         slug="traders_copy_trade",
         start_dt=start,
@@ -1000,7 +1000,7 @@ async def test_replay_discover_runs_strategies_that_only_override_detect(monkeyp
     )
 
     strategy = _PlainDetectScannerStrategy()
-    opps = await strategy_backtester._replay_discover_opportunities(
+    opps, _ = await strategy_backtester._replay_discover_opportunities(
         strategy=strategy,
         slug="unit_plain_detect",
         start_dt=start,

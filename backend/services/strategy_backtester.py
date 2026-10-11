@@ -3475,7 +3475,7 @@ async def _replay_discover_opportunities(
     candidate_token_ids: list[str] | None = None,
     warmup_seconds: int = 0,
     progress_callback: Any = None,
-) -> list[_SyntheticOpp]:
+) -> tuple[list[_SyntheticOpp], dict[str, Any]]:
     """Replay-discovery: walk historical market state at sampled time
     ticks across [start_dt, end_dt] and call strategy.detect_async at
     each tick, accumulating returned opportunities.
@@ -3496,9 +3496,13 @@ async def _replay_discover_opportunities(
         events that arrived since the previous tick.  For book-only
         strategies this remains an empty list.
 
-    Returns a list of ``_SyntheticOpp`` instances that quack like
-    ``OpportunityHistory`` rows — the existing evaluate /
-    orchestrator-gate / matcher pipeline consumes them unchanged.
+    Returns ``(opps, stats)``.  ``opps`` is a list of ``_SyntheticOpp``
+    instances that quack like ``OpportunityHistory`` rows — the existing
+    evaluate / orchestrator-gate / matcher pipeline consumes them unchanged.
+    ``stats`` reports how the replay actually went (``ticks``, ``dispatched``,
+    ``failures``, ``first_error``) so the caller can tell the three zero-opp
+    modes apart: "every tick raised" (strategy bug), "no tick dispatched"
+    (data/scope problem), and "ran clean, found nothing".
     """
     import json as _json
     from sqlalchemy import text as _text
@@ -3527,7 +3531,9 @@ async def _replay_discover_opportunities(
         # on_event-driven crypto strategy — base class default ``detect()``
         # returns []; historical replay has nothing to do.  Hold-only /
         # scheduler-driven strategies fall here.
-        return []
+        return [], {
+            "ticks": 0, "dispatched": 0, "failures": 0, "first_error": None,
+        }
 
     # Step 1: build the time grid.  Resolution = ``sample_interval_seconds``,
     # bounded only by ``max_ticks`` (the safety cap that stops a 30-day window
@@ -3628,7 +3634,9 @@ async def _replay_discover_opportunities(
         # so the strategy's detect() reads from the event payload — the
         # current-only catalog file is not the right source for a
         # historical replay anyway.
-        return []
+        return [], {
+            "ticks": 0, "dispatched": 0, "failures": 0, "first_error": None,
+        }
 
     # Step 3: derive the token universe from the catalog.
     all_token_ids: list[str] = []
@@ -3780,6 +3788,8 @@ async def _replay_discover_opportunities(
     # Step 6: walk the time grid + run detect at each tick.
     detected_total: list[_SyntheticOpp] = []
     detect_failures = 0
+    ticks_dispatched = 0
+    _first_detect_exc: Exception | None = None
 
     # Carry-forward catalog state for scanner_tick (MARKET_DATA_REFRESH)
     # replay.  Catalog snapshots arrive at refresh cadence (~ minutes);
@@ -3953,6 +3963,7 @@ async def _replay_discover_opportunities(
         # the same shape live delivers (empty when the snapshot carried no event
         # context — the strategy then classifies from market text alone, exactly
         # as live does when the catalog refresh has no events array).
+        ticks_dispatched += 1
         try:
             if dispatch_via_on_event:
                 opps_at_tick = await _run_on_event_once(
@@ -3993,8 +4004,18 @@ async def _replay_discover_opportunities(
                     now_us=int(tick_t.timestamp() * 1_000_000),
                     books=prices_at_tick or None,
                 )
-        except Exception:
+        except Exception as exc:
             detect_failures += 1
+            if detect_failures == 1:
+                _first_detect_exc = exc
+                # Full traceback exactly once — this log line is the only
+                # path from "backtest returned 0 opps" to the strategy's
+                # root cause when the strategy code itself is buggy.
+                logger.error(
+                    "replay_discover: detect()/on_event() raised at tick %d/%d — "
+                    "later failures this run are counted, not re-logged",
+                    tick_i, n_ticks, exc_info=exc,
+                )
             continue
 
         # Warm-up tick: detect ran (state built up) but we don't emit its
@@ -4021,9 +4042,12 @@ async def _replay_discover_opportunities(
             )
 
     if detect_failures > 0:
-        logger.info(
-            "replay_discover: %d detect() failures across %d ticks",
-            detect_failures, n_ticks,
+        logger.warning(
+            "replay_discover: %d/%d dispatched detect()/on_event() calls raised — "
+            "first error: %s",
+            detect_failures, ticks_dispatched,
+            f"{type(_first_detect_exc).__name__}: {_first_detect_exc}"
+            if _first_detect_exc else "n/a",
         )
     if wallet_event_truncated:
         logger.warning(
@@ -4032,7 +4056,15 @@ async def _replay_discover_opportunities(
             _REPLAY_WALLET_EVENT_CAP,
         )
 
-    return detected_total
+    return detected_total, {
+        "ticks": n_ticks,
+        "dispatched": ticks_dispatched,
+        "failures": detect_failures,
+        "first_error": (
+            f"{type(_first_detect_exc).__name__}: {str(_first_detect_exc)[:200]}"
+            if _first_detect_exc else None
+        ),
+    }
 
 
 def _opp_to_positions_data(opp: Any) -> dict[str, Any]:
@@ -4652,10 +4684,14 @@ async def run_execution_backtest(
             # live system saw the same opp the synthesis would have
             # picked up.
             replay_opps: list = []
+            replay_stats: dict[str, Any] = {
+                "ticks": 0, "dispatched": 0, "failures": 0, "first_error": None,
+            }
+            replay_hard_failed = False
             discovery_mode = "live_opps"
             if discover_from_history:
                 try:
-                    replay_opps = await _replay_discover_opportunities(
+                    replay_opps, replay_stats = await _replay_discover_opportunities(
                         strategy=strategy,
                         slug=slug,
                         start_dt=start_dt,
@@ -4677,6 +4713,7 @@ async def run_execution_backtest(
                         f"Discovery replay FAILED: {type(exc).__name__}: {str(exc)[:200]}"
                     )
                     replay_opps = []
+                    replay_hard_failed = True
 
                 # Always surface what the discovery path did so we can
                 # tell "code ran but found 0" vs "code never ran" from
@@ -4708,18 +4745,59 @@ async def run_execution_backtest(
                         f"(live_opps={len(opps) - len(new_opps)}, replay={len(replay_opps)}, "
                         f"deduped={len(replay_opps) - len(new_opps)})"
                     )
-                else:
-                    # Code ran but produced 0 opps.  Tell the operator
-                    # WHY — most likely: strategy doesn't override
-                    # detect_async, or the catalog didn't yield any
-                    # markets with reconstructable prices in window,
-                    # or every detect_async call timed out.
-                    result.validation_warnings.append(
-                        "Discovery replay produced 0 synthetic opps "
-                        "(strategy may not override detect_async, or no "
-                        "catalog markets had reconstructable prices in "
-                        "window).  Falling back to live opp_history only."
-                    )
+                    if replay_stats["failures"]:
+                        # Partial failure: results exist but are incomplete —
+                        # dropping crashing ticks silently would make the
+                        # run look healthier than it was.
+                        result.validation_warnings.append(
+                            f"Discovery replay: {replay_stats['failures']}/"
+                            f"{replay_stats['dispatched']} dispatched detect()/"
+                            f"on_event() calls RAISED — results above are partial. "
+                            f"First error: {replay_stats['first_error']} "
+                            "(full traceback in backend logs)"
+                        )
+                elif not replay_hard_failed:
+                    # Code ran but produced 0 opps.  Classify the honest
+                    # cause from replay_stats: "every tick raised" (fix the
+                    # strategy), "no tick dispatched" (fix the data/scope),
+                    # and "ran clean, found nothing" (the strategy's
+                    # thresholds genuinely matched) need completely
+                    # different operator responses.  (When the replay
+                    # itself hard-failed above, that FAILED warning is the
+                    # honest message — a classification here would guess.)
+                    if replay_stats["failures"] == replay_stats["dispatched"] and replay_stats["failures"] > 0:
+                        result.validation_warnings.append(
+                            "Discovery replay produced 0 synthetic opps: EVERY "
+                            f"dispatched tick ({replay_stats['failures']}) raised in "
+                            f"detect()/on_event() — first error: "
+                            f"{replay_stats['first_error']}.  Fix the strategy "
+                            "code; full traceback in backend logs."
+                        )
+                    elif replay_stats["dispatched"] == 0:
+                        result.validation_warnings.append(
+                            "Discovery replay produced 0 synthetic opps: no tick in "
+                            "the window dispatched the strategy — either no events/"
+                            "reconstructable prices in the replay scope (dataset "
+                            "granularity vs. sample interval, subscription coverage, "
+                            "token scope) or the strategy implements none of "
+                            "detect/detect_async/on_event.  Falling back to live "
+                            "opp_history only."
+                        )
+                    else:
+                        clean = replay_stats["dispatched"] - replay_stats["failures"]
+                        warning = (
+                            "Discovery replay produced 0 synthetic opps: "
+                            f"detect()/on_event() ran clean on {clean} ticks but "
+                            "emitted no positions (strategy thresholds matched "
+                            "nothing)."
+                        )
+                        if replay_stats["failures"]:
+                            warning += (
+                                f"  {replay_stats['failures']} further ticks raised "
+                                f"(first: {replay_stats['first_error']})."
+                            )
+                        warning += "  Falling back to live opp_history only."
+                        result.validation_warnings.append(warning)
             # Surface the discovery mode on the result so the UI can
             # show "this run used historical discovery" / "live opps
             # only" / "hybrid".

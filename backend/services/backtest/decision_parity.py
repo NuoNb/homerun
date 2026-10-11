@@ -158,7 +158,7 @@ async def replay_decision_identities(
 
     _iso = enter_replay_isolation()
     try:
-        opps = await _replay_discover_opportunities(
+        opps, _ = await _replay_discover_opportunities(
             strategy=strategy,
             slug=slug,
             start_dt=start,
