@@ -15,7 +15,8 @@ import urllib.parse
 import uuid
 from utils.utcnow import utcnow
 from typing import Any, Optional
-from xml.etree import ElementTree
+from defusedxml.ElementTree import fromstring as _xml_fromstring
+from xml.etree.ElementTree import ParseError as _XmlParseError
 
 import httpx
 
@@ -423,7 +424,7 @@ class NewsSentimentAnalyzer:
                 )
                 return []
 
-            root = ElementTree.fromstring(response.text)
+            root = _xml_fromstring(response.text)
             articles: list[dict] = []
 
             for item in root.findall(".//item")[:max_results]:
@@ -458,7 +459,7 @@ class NewsSentimentAnalyzer:
             )
             return articles
 
-        except ElementTree.ParseError as exc:
+        except _XmlParseError as exc:
             logger.error("Failed to parse Google News RSS XML: %s", exc)
             return []
         except httpx.TimeoutException:
@@ -499,7 +500,7 @@ class NewsSentimentAnalyzer:
             if response.status_code != 200:
                 return []
 
-            root = ElementTree.fromstring(response.text)
+            root = _xml_fromstring(response.text)
 
             for item in root.findall(".//item")[:max_results]:
                 title = item.findtext("title", "").strip()

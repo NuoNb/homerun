@@ -692,7 +692,7 @@ class MarketAnalyzer:
     async def _basic_news_search(self, query: str, max_results: int = 5) -> dict:
         """Minimal RSS-based news search without LLM sentiment analysis."""
         import urllib.parse
-        from xml.etree import ElementTree
+        from defusedxml.ElementTree import fromstring as _xml_fromstring
 
         try:
             encoded_query = urllib.parse.quote(query)
@@ -709,7 +709,7 @@ class MarketAnalyzer:
                     "error": f"RSS fetch failed (HTTP {response.status_code})",
                 }
 
-            root = ElementTree.fromstring(response.text)
+            root = _xml_fromstring(response.text)
             articles = []
             for item in root.findall(".//item")[:max_results]:
                 articles.append(

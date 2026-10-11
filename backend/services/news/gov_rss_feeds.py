@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
-from xml.etree import ElementTree
+from defusedxml.ElementTree import fromstring as _xml_fromstring
 
 import httpx
 from sqlalchemy import select
@@ -187,7 +187,7 @@ class GovRSSFeedService:
                 self._last_errors.append(f"{name}: HTTP {resp.status_code}")
                 return []
 
-            root = ElementTree.fromstring(resp.text)
+            root = _xml_fromstring(resp.text)
             articles: list[GovArticle] = []
 
             items = root.findall(".//item")
