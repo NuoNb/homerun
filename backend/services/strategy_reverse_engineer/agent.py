@@ -220,6 +220,16 @@ async def run_reverse_engineer_agent(job_id: str) -> dict[str, Any]:
     # promotes whatever the highest-scored iteration was.
     if state["best_iteration_id"] is not None:
         await _finalize_job(job_id=job_id, override_iteration_id=None, state=state)
+    else:
+        # Agent finished its ReAct loop without a single submission (e.g. it
+        # emitted a prose "answer" instead of calling submit_candidate).
+        # _finalize_job never ran, so persist the outcome here — without
+        # this the job row stays "running"/0% forever as a zombie.
+        await _mark_done(
+            job_id,
+            status="completed",
+            activity="Agent finished without submitting any candidate iteration",
+        )
 
     return {
         "job_id": job_id,

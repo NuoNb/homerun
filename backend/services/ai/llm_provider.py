@@ -2,7 +2,8 @@
 Multi-provider LLM abstraction layer.
 
 Supports: OpenAI, Anthropic, Google (Gemini), xAI (Grok), DeepSeek,
-OpenRouter, Ollama, LM Studio, NVIDIA NIM, and other OpenAI-compatible APIs.
+OpenRouter, Ollama, LM Studio, NVIDIA NIM, Zhipu (智谱 GLM), and other
+OpenAI-compatible APIs.
 
 Provider is detected by model name prefix:
 - gpt-*, o1-*, o3-*, o4-*, chatgpt-* -> OpenAI
@@ -14,6 +15,7 @@ Provider is detected by model name prefix:
 - ollama/* -> Ollama
 - lmstudio/* -> LM Studio
 - nvidia/* -> NVIDIA NIM
+- glm-*, zhipu/* -> Zhipu (智谱 GLM)
 - Any other -> selected provider, then first configured provider
 
 Usage:
@@ -85,6 +87,12 @@ OPENAI_MODEL_PREFIXES: tuple[str, ...] = ("gpt-", "o1-", "o3-", "o4-", "chatgpt-
 XAI_MODEL_PREFIXES: tuple[str, ...] = ("grok-",)
 DEEPSEEK_MODEL_PREFIXES: tuple[str, ...] = ("deepseek-",)
 NVIDIA_MODEL_PREFIXES: tuple[str, ...] = ("nvidia/",)
+ZHIPU_MODEL_PREFIXES: tuple[str, ...] = ("glm-", "zhipu/")
+# GLM-5.x hard output ceiling per docs.bigmodel.cn / docs.z.ai core-parameter
+# tables (glm-5.3 and glm-5.3-flash: max_tokens max 131072, default 65536).
+# Codegen/agent call sites pass this so output length is bounded by content
+# (and the HTTP timeout), never by the token cap.
+ZHIPU_GLM5_MAX_OUTPUT_TOKENS: int = 131072
 
 
 # ==================== DATA CLASSES ====================
@@ -155,6 +163,7 @@ class LLMProvider(str, Enum):
     OLLAMA = "ollama"
     LMSTUDIO = "lmstudio"
     NVIDIA = "nvidia"
+    ZHIPU = "zhipu"
 
 
 def _ensure_openai_compatible_base_url(base_url: str, default_base_url: str) -> str:
@@ -188,6 +197,8 @@ def _normalize_model_name_for_provider(model: str, provider: LLMProvider) -> str
         return model_name[len("lmstudio/") :]
     if provider == LLMProvider.NVIDIA and model_name.startswith("nvidia/"):
         return model_name[len("nvidia/") :]
+    if provider == LLMProvider.ZHIPU and model_name.startswith("zhipu/"):
+        return model_name[len("zhipu/") :]
     return model_name
 
 
@@ -571,6 +582,7 @@ class OpenAIProvider(BaseLLMProvider):
         base_url: str = "https://api.openai.com/v1",
         model_prefixes: Optional[tuple[str, ...]] = OPENAI_MODEL_PREFIXES,
         structured_output_format: str = "json_schema",
+        request_timeout: float = 120.0,
     ):
         """Initialize the OpenAI provider.
 
@@ -581,6 +593,9 @@ class OpenAIProvider(BaseLLMProvider):
                 Set to None to return all models.
             structured_output_format: OpenAI-compatible response_format type.
                 Supported values: "json_schema", "json_object", "text".
+            request_timeout: HTTP timeout for chat/completion calls. Slow
+                OpenAI-compatible providers (e.g. Zhipu GLM codegen) override
+                this; short calls like list_models pass their own timeout.
         """
         self.api_key = api_key
         self.base_url = _ensure_openai_compatible_base_url(base_url, "https://api.openai.com/v1")
@@ -588,12 +603,16 @@ class OpenAIProvider(BaseLLMProvider):
         if structured_output_format not in {"json_schema", "json_object", "text"}:
             raise ValueError("structured_output_format must be one of: 'json_schema', 'json_object', 'text'")
         self._structured_output_format = structured_output_format
-        self._shared_client: Optional[httpx.AsyncClient] = None
+        self._request_timeout = request_timeout
+        self._clients: dict[float, httpx.AsyncClient] = {}
 
-    def _get_shared_client(self, timeout: float = 120.0) -> httpx.AsyncClient:
-        if self._shared_client is None or self._shared_client.is_closed:
-            self._shared_client = httpx.AsyncClient(timeout=timeout)
-        return self._shared_client
+    def _get_shared_client(self, timeout: Optional[float] = None) -> httpx.AsyncClient:
+        effective = self._request_timeout if timeout is None else timeout
+        client = self._clients.get(effective)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=effective)
+            self._clients[effective] = client
+        return client
 
     def _build_headers(self) -> dict[str, str]:
         """Build HTTP headers for OpenAI API requests."""
@@ -796,18 +815,22 @@ class OpenAIProvider(BaseLLMProvider):
         tools: Optional[list[ToolDefinition]] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        *,
+        extra_payload: Optional[dict[str, Any]] = None,
     ) -> LLMResponse:
         """Send a chat completion request to the OpenAI API.
 
         Args:
             messages: Conversation messages.
             model: Model identifier (e.g. "gpt-4o-mini").
-            tools: Optional tool definitions.
+            tools: Optional tool definitions for function calling.
             temperature: Sampling temperature.
             max_tokens: Maximum response tokens.
+            extra_payload: Provider-specific request body fields merged on top
+                of the standard payload (e.g. Zhipu's ``thinking`` switch).
 
         Returns:
-            LLMResponse with content and usage.
+            LLMResponse with content and tool calls.
         """
         start_ms = int(time.time() * 1000)
 
@@ -819,8 +842,10 @@ class OpenAIProvider(BaseLLMProvider):
         }
         if tools:
             payload["tools"] = self._format_tools(tools)
+        if extra_payload:
+            payload.update(extra_payload)
 
-        client = self._get_shared_client(timeout=120.0)
+        client = self._get_shared_client()
         response = await _retry_with_backoff(
             lambda: client.post(
                 f"{self.base_url}/chat/completions",
@@ -865,6 +890,8 @@ class OpenAIProvider(BaseLLMProvider):
         model: str,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        *,
+        extra_payload: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[str, None]:
         """Stream chat completion tokens from the OpenAI API.
 
@@ -876,6 +903,8 @@ class OpenAIProvider(BaseLLMProvider):
             model: Model identifier.
             temperature: Sampling temperature.
             max_tokens: Maximum response tokens.
+            extra_payload: Provider-specific request body fields merged on top
+                of the standard payload (e.g. Zhipu's ``thinking`` switch).
 
         Yields:
             Text chunks from the streaming response.
@@ -887,8 +916,10 @@ class OpenAIProvider(BaseLLMProvider):
             "max_tokens": max_tokens,
             "stream": True,
         }
+        if extra_payload:
+            payload.update(extra_payload)
 
-        client = self._get_shared_client(timeout=120.0)
+        client = self._get_shared_client()
         async with client.stream(
             "POST",
             f"{self.base_url}/chat/completions",
@@ -1979,6 +2010,112 @@ class NvidiaProvider(BaseLLMProvider):
         )
 
 
+class ZhipuProvider(BaseLLMProvider):
+    """Zhipu (智谱) GLM provider using the OpenAI-compatible API.
+
+    Zhipu serves the GLM model family (GLM-4.5, GLM-4.6, GLM-5.3, ...) at
+    ``https://open.bigmodel.cn/api/paas/v4`` (international mirror:
+    ``https://api.z.ai/api/paas/v4``). The API root ends in ``/v4``, not
+    ``/v1``, so the shared ``/v1``-appending normalizer must be bypassed —
+    the delegate's base URL is overwritten after construction.
+    """
+
+    provider = LLMProvider.ZHIPU
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://open.bigmodel.cn/api/paas/v4",
+    ):
+        """Initialize the Zhipu provider.
+
+        Args:
+            api_key: Zhipu API key from bigmodel.cn / z.ai.
+            base_url: API base URL (override for the z.ai mirror or proxies).
+        """
+        self.api_key = api_key
+        self.base_url = (
+            (base_url or "").strip().rstrip("/")
+            or "https://open.bigmodel.cn/api/paas/v4"
+        )
+        self._delegate = OpenAIProvider(
+            api_key=api_key,
+            base_url=self.base_url,
+            model_prefixes=ZHIPU_MODEL_PREFIXES,
+            structured_output_format="json_object",
+            request_timeout=300.0,
+        )
+        # OpenAIProvider.__init__ appends "/v1" to any base URL not already
+        # ending in "/v1", which corrupts Zhipu's "/api/paas/v4" root. All
+        # request paths read `base_url` at call time, so restore it here.
+        self._delegate.base_url = self.base_url
+
+    async def list_models(self) -> list[dict[str, str]]:
+        """Fetch available models from the Zhipu API."""
+        return await self._delegate.list_models()
+
+    @staticmethod
+    def _thinking_payload(model: str, *, tools: bool) -> dict[str, Any]:
+        # GLM-5 models are forced-thinking and reject thinking.type="disabled";
+        # the default reasoning_effort="max" burns the output budget on
+        # chain-of-thought before the JSON body — truncating code drafts and
+        # starving tool-call JSON mid-argument. Low effort keeps tool calling
+        # fully functional while fitting normal output budgets.
+        # GLM-4.5/4.6 accept the classic switch, but their tool calling
+        # requires thinking enabled, so only tool-free calls dial it down.
+        if model.startswith("glm-5"):
+            return {"reasoning_effort": "low"}
+        if model.startswith(("glm-4.5", "glm-4.6")) and not tools:
+            return {"thinking": {"type": "disabled"}}
+        return {}
+
+    async def chat(
+        self,
+        messages: list[LLMMessage],
+        model: str,
+        tools: Optional[list[ToolDefinition]] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        """Send a chat completion request via the Zhipu API."""
+        normalized_model = _normalize_model_name_for_provider(model, self.provider)
+        extra = self._thinking_payload(normalized_model, tools=bool(tools)) or None
+        response = await self._delegate.chat(
+            messages, normalized_model, tools, temperature, max_tokens,
+            extra_payload=extra,
+        )
+        response.provider = self.provider.value
+        return response
+
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> AsyncGenerator[str, None]:
+        """Stream chat completion tokens via the Zhipu API."""
+        normalized_model = _normalize_model_name_for_provider(model, self.provider)
+        async for chunk in self._delegate.chat_stream(
+            messages, normalized_model, temperature, max_tokens,
+            extra_payload=self._thinking_payload(normalized_model, tools=False),
+        ):
+            yield chunk
+
+    async def structured_output(
+        self,
+        messages: list[LLMMessage],
+        schema: dict,
+        model: str,
+        temperature: float = 0.0,
+    ) -> dict:
+        """Get structured JSON output from the Zhipu API."""
+        normalized_model = _normalize_model_name_for_provider(model, self.provider)
+        return await self._delegate.structured_output(
+            messages, schema, normalized_model, temperature
+        )
+
+
 # ==================== OLLAMA PROVIDER ====================
 
 
@@ -2335,6 +2472,18 @@ class LLMManager:
                     )
                     logger.info("Initialized NVIDIA NIM LLM provider")
 
+                zhipu_key = decrypt_secret(app_settings.zhipu_api_key)
+                zhipu_base_url = app_settings.zhipu_base_url
+                if zhipu_key:
+                    self._providers[LLMProvider.ZHIPU] = ZhipuProvider(
+                        api_key=zhipu_key,
+                        base_url=zhipu_base_url or "https://open.bigmodel.cn/api/paas/v4",
+                    )
+                    logger.info(
+                        "Initialized Zhipu LLM provider (base_url=%s)",
+                        self._providers[LLMProvider.ZHIPU].base_url,
+                    )
+
                 enable_ollama = selected_provider == LLMProvider.OLLAMA or bool((ollama_base_url or "").strip())
                 if enable_ollama:
                     self._providers[LLMProvider.OLLAMA] = OllamaProvider(
@@ -2374,6 +2523,7 @@ class LLMManager:
                     LLMProvider.OLLAMA: "llama3.2:latest",
                     LLMProvider.LMSTUDIO: "local-model",
                     LLMProvider.NVIDIA: "nvidia/meta/llama-3.3-70b-instruct",
+                    LLMProvider.ZHIPU: "glm-4.6",
                 }
 
                 configured_model = app_settings.ai_default_model or app_settings.llm_model
@@ -2495,6 +2645,8 @@ class LLMManager:
             return LLMProvider.LMSTUDIO
         if model_lower.startswith("nvidia/"):
             return LLMProvider.NVIDIA
+        if any(model_lower.startswith(p) for p in ZHIPU_MODEL_PREFIXES):
+            return LLMProvider.ZHIPU
 
         # For generic local model names (e.g. llama3.2, qwen2.5),
         # prefer the explicit provider selected in settings.

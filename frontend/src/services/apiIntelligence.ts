@@ -7,6 +7,8 @@ import type { Trader } from './apiTraders'
 
 // AI endpoints that invoke LLM calls need a longer timeout than the default 15s
 const AI_TIMEOUT = { timeout: 120_000 }
+// Full source-code generation can emit 8000+ tokens of JSON and takes minutes
+const CODEGEN_TIMEOUT = { timeout: 300_000 }
 
 export const getAIStatus = () => api.get('/ai/status')
 export const analyzeResolution = (data: any) => api.post('/ai/resolution/analyze', data, AI_TIMEOUT)
@@ -190,7 +192,7 @@ export const generateAIStrategyDraft = async (params: {
   source_key?: string
   model?: string
 }): Promise<AIStrategyDraftGenerationResponse> => {
-  const { data } = await api.post('/ai/generate/strategy-draft', params, AI_TIMEOUT)
+  const { data } = await api.post('/ai/generate/strategy-draft', params, CODEGEN_TIMEOUT)
   return unwrapApiData(data)
 }
 
@@ -211,7 +213,7 @@ export const modifyAIStrategyCode = async (params: {
   aliases?: string[]
   model?: string
 }): Promise<AIModifyStrategyCodeResponse> => {
-  const { data } = await api.post('/ai/modify/strategy-code', params, AI_TIMEOUT)
+  const { data } = await api.post('/ai/modify/strategy-code', params, CODEGEN_TIMEOUT)
   return unwrapApiData(data)
 }
 
@@ -247,7 +249,7 @@ export const generateAIDataSourceDraft = async (params: {
   source_kind?: string
   model?: string
 }): Promise<AIDataSourceDraftGenerationResponse> => {
-  const { data } = await api.post('/ai/generate/data-source-draft', params, AI_TIMEOUT)
+  const { data } = await api.post('/ai/generate/data-source-draft', params, CODEGEN_TIMEOUT)
   return unwrapApiData(data)
 }
 

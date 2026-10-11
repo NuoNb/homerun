@@ -1402,7 +1402,7 @@ class AppSettings(Base):
     # LLM/AI Service Settings
     openai_api_key = Column(String, nullable=True)
     anthropic_api_key = Column(String, nullable=True)
-    llm_provider = Column(String, default="none")  # none, openai, anthropic, google, xai, deepseek, openrouter, ollama, lmstudio
+    llm_provider = Column(String, default="none")  # none, openai, anthropic, google, xai, deepseek, openrouter, ollama, lmstudio, nvidia, zhipu
     llm_model = Column(String, nullable=True)
     google_api_key = Column(String, nullable=True)
     xai_api_key = Column(String, nullable=True)
@@ -1415,6 +1415,8 @@ class AppSettings(Base):
     lmstudio_base_url = Column(String, nullable=True)
     nvidia_api_key = Column(String, nullable=True)
     nvidia_base_url = Column(String, nullable=True)
+    zhipu_api_key = Column(String, nullable=True)
+    zhipu_base_url = Column(String, nullable=True)
 
     # AI Feature Settings
     ai_enabled = Column(Boolean, default=False)  # Master switch for AI features

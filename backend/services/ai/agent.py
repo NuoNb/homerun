@@ -25,7 +25,7 @@ from typing import AsyncGenerator, Callable, Optional
 import jsonschema
 
 from services.ai import get_llm_manager
-from services.ai.llm_provider import LLMMessage, ToolDefinition
+from services.ai.llm_provider import LLMMessage, ToolDefinition, ZHIPU_GLM5_MAX_OUTPUT_TOKENS
 from services.ai.scratchpad import ScratchpadService
 
 logger = logging.getLogger(__name__)
@@ -260,12 +260,17 @@ class Agent:
                     session_id,
                 )
 
-                # Call the LLM
+                # Call the LLM. Agents embed whole strategy sources inside
+                # tool-call arguments, and reasoning models (GLM-5) spend
+                # part of the budget on chain-of-thought — the 4096 default
+                # truncates mid-argument. Pass the GLM-5 hard ceiling so the
+                # token cap never binds.
                 response = await manager.chat(
                     messages=self._messages,
                     model=model,
                     tools=tool_defs,
                     temperature=self.temperature,
+                    max_tokens=ZHIPU_GLM5_MAX_OUTPUT_TOKENS,
                     purpose=self.session_type,
                 )
 
@@ -569,6 +574,7 @@ class Agent:
             model=model,
             tools=None,  # No tools -- force a text answer
             temperature=self.temperature,
+            max_tokens=ZHIPU_GLM5_MAX_OUTPUT_TOKENS,
             purpose=self.session_type,
         )
 

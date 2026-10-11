@@ -270,9 +270,8 @@ def kalshi_payload(settings: AppSettings) -> dict[str, Any]:
 def oracle_payload(settings: AppSettings) -> dict[str, Any]:
     """Oracle data source credentials (currently Chainlink Data Streams).
 
-    Uses ``getattr`` with a default so older AppSettings rows that haven't
-    been migrated yet don't blow up the GET /settings response — column
-    is added in alembic 202604250002.
+    Uses ``getattr`` with a default so AppSettings rows without the
+    column don't blow up the GET /settings response.
     """
     return {
         "chainlink_direct_api_key": mask_stored_secret(
@@ -300,6 +299,8 @@ def llm_payload(settings: AppSettings) -> dict[str, Any]:
         "openrouter_base_url": settings.openrouter_base_url,
         "nvidia_api_key": mask_stored_secret(settings.nvidia_api_key),
         "nvidia_base_url": settings.nvidia_base_url,
+        "zhipu_api_key": mask_stored_secret(settings.zhipu_api_key),
+        "zhipu_base_url": settings.zhipu_base_url,
         "model": settings.llm_model,
         "max_monthly_spend": settings.ai_max_monthly_spend,
         "model_assignments": settings.llm_model_assignments or {},
@@ -797,6 +798,10 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
             set_encrypted_secret(settings, "nvidia_api_key", llm.nvidia_api_key)
         if getattr(llm, "nvidia_base_url", None) is not None:
             settings.nvidia_base_url = (llm.nvidia_base_url or "").strip() or None
+        if getattr(llm, "zhipu_api_key", None) is not None:
+            set_encrypted_secret(settings, "zhipu_api_key", llm.zhipu_api_key)
+        if getattr(llm, "zhipu_base_url", None) is not None:
+            settings.zhipu_base_url = (llm.zhipu_base_url or "").strip() or None
         if llm.model is not None:
             settings.llm_model = llm.model or None
             settings.ai_default_model = llm.model or None

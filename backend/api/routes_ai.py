@@ -1319,7 +1319,7 @@ async def generate_strategy_draft_with_ai(
     )
     from models.database import DataSource, Strategy
     from services.ai import get_llm_manager
-    from services.ai.llm_provider import LLMMessage
+    from services.ai.llm_provider import LLMMessage, ZHIPU_GLM5_MAX_OUTPUT_TOKENS
     from services.strategy_loader import STRATEGY_TEMPLATE, validate_strategy_source
 
     manager = get_llm_manager()
@@ -1392,12 +1392,20 @@ async def generate_strategy_draft_with_ai(
             LLMMessage(role="user", content=json.dumps(user_payload, ensure_ascii=True)),
         ],
         model=request.model,
-        max_tokens=3200,
+        max_tokens=ZHIPU_GLM5_MAX_OUTPUT_TOKENS,
         purpose="ai_strategy_draft_generation",
     )
 
     parsed = _extract_json_payload(response.content or "")
     if not isinstance(parsed, dict):
+        logger.warning(
+            "Strategy draft parse failed: model=%s output_tokens=%s content_len=%s head=%r tail=%r",
+            response.model,
+            response.usage.output_tokens if response.usage else None,
+            len(response.content or ""),
+            (response.content or "")[:400],
+            (response.content or "")[-200:],
+        )
         raise HTTPException(
             status_code=422,
             detail="AI returned a non-JSON strategy draft. Retry with a more specific description.",
@@ -1453,7 +1461,7 @@ async def generate_strategy_draft_with_ai(
                 LLMMessage(role="user", content=json.dumps(repair_payload, ensure_ascii=True)),
             ],
             model=request.model,
-            max_tokens=3200,
+            max_tokens=ZHIPU_GLM5_MAX_OUTPUT_TOKENS,
             purpose="ai_strategy_draft_repair",
         )
         repaired_payload = _extract_json_payload(repair_response.content or "")
@@ -1512,7 +1520,7 @@ async def modify_strategy_code_with_ai(
     )
     from models.database import DataSource, Strategy
     from services.ai import get_llm_manager
-    from services.ai.llm_provider import LLMMessage
+    from services.ai.llm_provider import LLMMessage, ZHIPU_GLM5_MAX_OUTPUT_TOKENS
     from services.strategy_loader import validate_strategy_source
 
     manager = get_llm_manager()
@@ -1623,7 +1631,7 @@ async def modify_strategy_code_with_ai(
             LLMMessage(role="user", content=json.dumps(user_payload, ensure_ascii=True)),
         ],
         model=request.model,
-        max_tokens=5000,
+        max_tokens=ZHIPU_GLM5_MAX_OUTPUT_TOKENS,
         purpose="ai_strategy_code_modification",
     )
 
@@ -1690,7 +1698,7 @@ async def modify_strategy_code_with_ai(
                 LLMMessage(role="user", content=json.dumps(repair_payload, ensure_ascii=True)),
             ],
             model=request.model,
-            max_tokens=5000,
+            max_tokens=ZHIPU_GLM5_MAX_OUTPUT_TOKENS,
             purpose="ai_strategy_code_modification_repair",
         )
         repaired_payload = _extract_json_payload(repair_response.content or "")
@@ -1753,7 +1761,7 @@ async def generate_data_source_draft_with_ai(
     )
     from models.database import DataSource
     from services.ai import get_llm_manager
-    from services.ai.llm_provider import LLMMessage
+    from services.ai.llm_provider import LLMMessage, ZHIPU_GLM5_MAX_OUTPUT_TOKENS
     from services.data_source_catalog import build_data_source_source_code
     from services.data_source_loader import DATA_SOURCE_TEMPLATE, validate_data_source_source
 
@@ -1811,7 +1819,7 @@ async def generate_data_source_draft_with_ai(
             LLMMessage(role="user", content=json.dumps(user_payload, ensure_ascii=True)),
         ],
         model=request.model,
-        max_tokens=3200,
+        max_tokens=ZHIPU_GLM5_MAX_OUTPUT_TOKENS,
         purpose="ai_data_source_draft_generation",
     )
 
@@ -1880,7 +1888,7 @@ async def generate_data_source_draft_with_ai(
                 LLMMessage(role="user", content=json.dumps(repair_payload, ensure_ascii=True)),
             ],
             model=request.model,
-            max_tokens=3200,
+            max_tokens=ZHIPU_GLM5_MAX_OUTPUT_TOKENS,
             purpose="ai_data_source_draft_repair",
         )
         repaired_payload = _extract_json_payload(repair_response.content or "")
@@ -2195,7 +2203,7 @@ async def ai_chat(
     try:
         from services.ai import get_llm_manager
         from services.ai.chat_memory import chat_memory_service
-        from services.ai.llm_provider import LLMMessage
+        from services.ai.llm_provider import LLMMessage, ZHIPU_GLM5_MAX_OUTPUT_TOKENS
 
         manager = get_llm_manager()
         if not manager.is_available():
