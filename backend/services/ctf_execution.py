@@ -1484,7 +1484,7 @@ class CTFExecutionService:
         checksum_wallet = w3.to_checksum_address(execution_wallet)
 
         # Operator-tunable policy (config + DB-overridable; see
-        # config.Settings + alembic 202604280001).
+        # config.Settings).
         min_payout_usd = float(getattr(settings, "REDEEMER_MIN_PAYOUT_USD", 0.10) or 0.0)
         max_gas_price_gwei = float(getattr(settings, "REDEEMER_MAX_GAS_PRICE_GWEI", 200.0) or 0.0)
         force_losers = bool(getattr(settings, "REDEEMER_FORCE_INCLUDING_LOSERS", False))

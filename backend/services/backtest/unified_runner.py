@@ -48,7 +48,7 @@ logger = logging.getLogger("backtest.unified_runner")
 
 
 # Process-local hot cache.  Real persistence lives in the
-# ``backtest_runs`` table (Alembic 202604300005).  The cache fronts
+# ``backtest_runs`` table.  The cache fronts
 # the table for the very-recent reads the run-history poll generates
 # every 5 seconds in the Studio UI.
 _RECENT_RUNS_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()

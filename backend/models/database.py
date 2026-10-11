@@ -22,7 +22,6 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.types import TypeDecorator, DateTime as SADateTime
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime, timezone
-from pathlib import Path
 from contextlib import asynccontextmanager as _asynccontextmanager
 import logging as _logging
 import enum
@@ -71,14 +70,11 @@ Base = declarative_base()
 # ── Native PostgreSQL declarative partitioning ───────────────────────────────
 # SQLAlchemy core has no first-class RANGE partitioning, but the fresh-DB
 # bootstrap builds the schema from THIS metadata via ``Base.metadata.create_all``
-# (see ``apply_schema`` / ``init_database``).  To keep fresh installs and the
-# alembic migration chain producing identical schema — the contract enforced by
-# ``test_alembic_roundtrip`` / ``test_alembic_replay_base_to_head_on_empty_db`` —
-# teach ``CreateTable`` to append ``PARTITION BY`` for any table flagged with
+# (see ``init_database``).  Teach ``CreateTable`` to append
+# ``PARTITION BY`` for any table flagged with
 # ``info={"partition_by": ...}`` and auto-create its DEFAULT partition.  Ongoing
 # daily partitions + retention are managed at runtime by
-# ``MaintenanceService.maintain_partitions``; existing databases are converted by
-# the matching alembic cutover migration.
+# ``MaintenanceService.maintain_partitions``.
 @_sa_compiles(_CreateTable, "postgresql")
 def _emit_partition_by(create, compiler, **kw):
     sql = compiler.visit_create_table(create, **kw)
@@ -1596,7 +1592,7 @@ class AppSettings(Base):
     max_slippage_percent = Column(Float, default=2.0)
     min_account_balance_usd = Column(Float, default=0.0)
 
-    # CTF Redeemer Policy (UI-tunable; see alembic 202604280001)
+    # CTF Redeemer Policy (UI-tunable)
     redeemer_min_payout_usd = Column(Float, nullable=True)
     redeemer_max_gas_price_gwei = Column(Float, nullable=True)
     redeemer_force_including_losers = Column(Boolean, nullable=True)
@@ -1604,7 +1600,7 @@ class AppSettings(Base):
     # Polymarket collateral selection — default for operator-initiated
     # split/merge calls. Recognized values: ``pusd``, ``usdc.e``,
     # ``usdc_native``. Redemption auto-detects collateral per-position
-    # from chain math regardless of this value (see alembic 202604300004).
+    # from chain math regardless of this value.
     polymarket_default_collateral = Column(String, nullable=True)
 
     # Operator-tunable latency fallbacks for the fill simulator + the
@@ -3381,7 +3377,7 @@ class TradeSignal(Base):
         #
         # 2026-05-10: dropped ``status`` from the indexed key set on
         # both partial indexes, and dropped the lower(status)
-        # functional index entirely (alembic 202605100001).  Status
+        # functional index entirely.  Status
         # transitions were the dominant HOT killer on this table
         # (601 K UPDATEs / 4.8% HOT in the 2026-05-09 soak); removing
         # status from every index restores HOT-eligibility for
@@ -6561,37 +6557,17 @@ async def release_conn(session):
         pass
 
 
-def _run_alembic_upgrade(connection) -> None:
-    from alembic import command
-    from alembic.config import Config
-    from sqlalchemy import inspect as _sa_inspect
-
-    backend_root = Path(__file__).resolve().parents[1]
-    alembic_cfg = Config(str(backend_root / "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", str(backend_root / "alembic"))
-    alembic_cfg.set_main_option("sqlalchemy.url", str(connection.engine.url))
-    alembic_cfg.attributes["connection"] = connection
-
-    # Fresh-DB bootstrap path.  The historical baseline migration uses
-    # ``Base.metadata.create_all`` — i.e. it dynamically reflects the
-    # CURRENT SQLAlchemy model, not the schema frozen at baseline-author
-    # time.  Sixty-plus post-baseline ``op.add_column`` migrations
-    # therefore collide on a from-empty replay because the columns they
-    # try to add already exist (create_all built them from the latest
-    # model).  The two-phase fix here: build the schema from the
-    # current model, then stamp head so the runner skips the broken
-    # add_column chain.  Existing DBs (with ``alembic_version``) take
-    # the normal upgrade branch — zero behavior change.
-    if not _sa_inspect(connection).has_table("alembic_version"):
-        Base.metadata.create_all(bind=connection)
-        command.stamp(alembic_cfg, "head")
-        return
-
-    command.upgrade(alembic_cfg, "head")
+def _create_schema(connection) -> None:
+    # Single bootstrap path: build any missing tables from the CURRENT
+    # SQLAlchemy models.  ``create_all`` never touches tables that already
+    # exist, so this is a no-op for a database that's already up to date
+    # and a full schema build for a fresh one.  Schema changes are made by
+    # editing the models above (dev-mode project: no migration chain).
+    Base.metadata.create_all(bind=connection)
 
 
 async def init_database():
-    """Initialize database and apply Alembic migrations.
+    """Initialize database, creating any tables missing from the models.
 
     Retries the initial connection up to 30 times (≈30s) to handle the
     race where PostgreSQL is still starting when the backend launches.
@@ -6609,7 +6585,7 @@ async def init_database():
     for attempt in range(max_retries):
         try:
             async with async_engine.begin() as conn:
-                await conn.run_sync(_run_alembic_upgrade)
+                await conn.run_sync(_create_schema)
             return
         except Exception as exc:
             if attempt >= max_retries - 1:

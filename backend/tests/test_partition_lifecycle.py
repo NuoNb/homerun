@@ -7,8 +7,8 @@ Validates the operational DDL that ``maintain_partitions`` relies on:
   cutoff (never the DEFAULT or current day).
 * new inserts route to the correct daily partition.
 
-The schema / migration side is covered by ``test_alembic_roundtrip``; this pins
-the runtime lifecycle behaviour.
+The schema side is owned by the SQLAlchemy models (``Base.metadata
+.create_all``); this pins the runtime lifecycle behaviour.
 """
 from __future__ import annotations
 

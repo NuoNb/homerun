@@ -185,7 +185,7 @@ cp .env.example .env       # edit APP_SECRETS_KEY at minimum
 docker compose up -d
 ```
 
-Pulls pre-built images from GHCR (`ghcr.io/braedonsaunders/homerun-backend` and `-frontend`). Add `--build` to build locally instead. The stack runs Postgres, Redis, the API, three worker planes, and the frontend behind nginx — Alembic migrations are applied automatically on first start. See [docker-compose.yml](./docker-compose.yml) and [.env.example](./.env.example) for details.
+Pulls pre-built images from GHCR (`ghcr.io/braedonsaunders/homerun-backend` and `-frontend`). Add `--build` to build locally instead. The stack runs Postgres, Redis, the API, three worker planes, and the frontend behind nginx — the database schema is created automatically on first start. See [docker-compose.yml](./docker-compose.yml) and [.env.example](./.env.example) for details.
 
 ### Prerequisites
 

@@ -113,7 +113,7 @@ _LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS = 20.0
 # normal cadence; the sweeper only handles abandoned residue.
 # Cycle cadence is process-local; the actual thresholds (age, drift,
 # residual) are sourced from ``config.Settings`` so operators can tune
-# them via env vars without an alembic migration.
+# them via env vars.
 # Pre-2026-04-28 sweep ran every 5 minutes — too lenient when our
 # own unfilled limit orders accumulate and reserve venue-side
 # collateral.  The 02:42 cascade showed $122 of a $237 wallet was

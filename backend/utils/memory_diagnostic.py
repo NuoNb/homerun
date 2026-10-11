@@ -140,7 +140,6 @@ def _enumerate_singleton_containers() -> list[tuple[str, int, str]]:
         "asyncio",
         "logging",
         "sqlalchemy",
-        "alembic",
         "pydantic",
         "pkg_resources",
         "importlib",

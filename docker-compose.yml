@@ -194,17 +194,17 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------
-  # Migrations — one-shot.  Workers and the API both depend on this
-  # completing successfully, which closes the alembic-pain-point the
-  # issue author hit (#302).
+  # Schema bootstrap — one-shot.  Workers and the API both depend on
+  # this completing successfully (closes the startup-race pain point
+  # from issue #302).
   # ---------------------------------------------------------------------
   migrate:
     <<: *backend-image
     container_name: homerun-migrate
     # Calls the same ``init_database()`` the FastAPI lifespan invokes —
     # so docker and launcher share one battle-tested bootstrap path
-    # (handles fresh DBs via create_all+stamp, existing DBs via
-    # ``alembic upgrade head``).
+    # (``Base.metadata.create_all`` builds missing tables; existing
+    # tables are never touched).
     command: ["python", "-c", "import asyncio; from models.database import init_database; asyncio.run(init_database())"]
     environment:
       <<: *backend-env

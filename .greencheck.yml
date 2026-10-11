@@ -17,7 +17,6 @@ safety:
     - ".env*"
     - ".github/**"
     - "data/**"
-    - "alembic/versions/**"
   max-files-per-fix: 10
   revert-on-regression: true
 

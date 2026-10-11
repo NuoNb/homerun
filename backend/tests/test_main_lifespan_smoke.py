@@ -123,11 +123,10 @@ async def test_lifespan_startup_and_shutdown_complete() -> None:
     child exits non-zero immediately and the ``returncode`` check below
     fires, so a real regression is never masked by a larger budget.
 
-    The boot cost here is irreducible full-app work, not a migration
-    chain.  The throwaway DB has no ``alembic_version`` table, so
-    ``init_database`` takes the fresh-install bootstrap branch
-    (``Base.metadata.create_all`` + ``alembic stamp head``) — it does
-    NOT replay the ~130-migration chain.  Measured warm breakdown:
+    The boot cost here is irreducible full-app work.  The throwaway DB
+    gets its schema straight from ``Base.metadata.create_all`` in
+    ``init_database`` — no migration replay is involved.  Measured warm
+    breakdown:
     ``import main`` ~2.7 s, lifespan startup ~1.2 s, lifespan shutdown
     ~3.5 s, ~8.4 s total.  A cold CI runner (cold FS cache, shared CPU,
     cold import) runs the import+boot several times slower, which is

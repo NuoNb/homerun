@@ -7327,7 +7327,7 @@ async def list_unconsumed_trade_signals(
         # production audit confirmed every existing row already
         # satisfies ``status = lower(status)``.  The defensive wrapper
         # was the sole consumer of ``idx_trade_signals_status_lower``;
-        # dropping it (alembic 202605100001) reclaims status updates as
+        # dropping that index reclaims status updates as
         # HOT-eligible operations.  Direct equality lets the planner
         # use the surviving partial indexes (or the PK + filter) and
         # is sub-millisecond on the 4 K-row table either way.
@@ -7426,8 +7426,8 @@ async def list_unconsumed_trade_signals(
         # is uniformly lowercase by producer contract (audit confirmed),
         # so the ``func.lower(func.coalesce(...))`` wrapper buys nothing
         # and was the sole consumer of ``idx_trade_signals_status_lower``
-        # (dropped in alembic 202605100001 to restore HOT-eligibility on
-        # status updates).  Direct ``IN`` predicate lands on the partial
+        # (since dropped to restore HOT-eligibility on status updates).
+        # Direct ``IN`` predicate lands on the partial
         # ``(source) WHERE status IN active`` index plus a sub-millisecond
         # status filter on the result.
         query = query.where(TradeSignal.status.in_(normalized_statuses))

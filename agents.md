@@ -69,8 +69,6 @@ homerun/
 │       ├── hooks/              # Custom hooks (useWebSocket, etc.)
 │       ├── store/atoms.ts      # Jotai atoms for global UI state
 │       └── lib/                # Utilities (cn, timestamps)
-├── alembic/                    # Database migrations
-│   └── versions/               # Timestamped migration files
 ├── data/                       # Postgres data dir (launcher-managed)
 ├── scripts/                    # Run/setup scripts and OS launchers
 │   ├── infra/                  # Setup, runtime, and health checks
@@ -286,32 +284,22 @@ class SomeModel(Base):
     children = relationship("ChildModel", back_populates="parent")
 ```
 
-### Alembic Migrations
+### Schema Changes (no migration chain)
 
-File naming: `{YYYYMMDD}{NNNN}_{description}.py` in `backend/alembic/versions/`.
+The project currently has no production deployments ("no-prod" mode), so
+there is no Alembic migration chain. Schema is owned entirely by the ORM
+models in `backend/models/database.py`; fresh databases are built from
+them via `Base.metadata.create_all` at startup (`init_database`).
 
-```python
-revision = "202602170001"
-down_revision = "<previous_revision>"
+When changing schema in no-prod mode:
+1. Edit the ORM model.
+2. Apply the change to your running database with a direct
+   `ALTER TABLE ... ADD COLUMN ...` (or simply recreate the database).
+3. Never create migration files.
 
-def _column_names(table_name: str) -> set[str]:
-    inspector = sa.inspect(op.get_bind())
-    if table_name not in set(inspector.get_table_names()):
-        return set()
-    return {col["name"] for col in inspector.get_columns(table_name)}
-
-def upgrade() -> None:
-    existing = _column_names("target_table")
-    columns = [sa.Column("new_field", sa.String(), nullable=True, server_default=sa.text("'default'"))]
-    for col in columns:
-        if col.name not in existing:
-            op.add_column("target_table", col)
-
-def downgrade() -> None:
-    pass  # Downgrades are disabled for safety
-```
-
-Always check `_column_names` before adding columns (idempotent migrations).
+If the owner declares a production deployment exists, this rule flips:
+reintroduce a migration chain (or equivalent schema versioning) before
+the next release and never rely on database reinstalls.
 
 ### Background Workers
 
