@@ -144,6 +144,17 @@ const PROVIDERS: ProviderConfig[] = [
     baseUrlDefault: 'https://integrate.api.nvidia.com/v1',
     description: 'Llama 3.x, Nemotron, Mixtral via build.nvidia.com',
   },
+  {
+    id: 'zhipu',
+    name: 'Zhipu (智谱 GLM)',
+    icon: Cloud,
+    keyField: 'zhipu_api_key',
+    keyPlaceholder: '...',
+    hasBaseUrl: true,
+    baseUrlField: 'zhipu_base_url',
+    baseUrlDefault: 'https://open.bigmodel.cn/api/paas/v4',
+    description: 'GLM-4.5, GLM-4.6, GLM-5.3 via bigmodel.cn (z.ai mirror supported)',
+  },
 ]
 
 type TestStatus = { status: 'idle' | 'testing' | 'success' | 'error'; message?: string }
@@ -413,6 +424,7 @@ export default function AIProvidersView() {
       ollama_base_url: llm?.ollama_base_url || '',
       lmstudio_base_url: llm?.lmstudio_base_url || '',
       nvidia_base_url: llm?.nvidia_base_url || '',
+      zhipu_base_url: llm?.zhipu_base_url || '',
     })
     // Populate keys from server masked values (e.g. "sk-p***") so
     // the input shows that a key is configured. Only overwrite keys

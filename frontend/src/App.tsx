@@ -350,13 +350,16 @@ const WORKER_TONE_CLASS: Record<WorkerHealthTone, string> = {
   red: 'bg-red-400 shadow-[0_0_10px_rgba(248,113,113,0.7)]',
 }
 
-function resolveWorkerHealth(worker?: WorkerStatus): {
+function resolveWorkerHealth(
+  worker: WorkerStatus | undefined,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): {
   state: string
   tone: WorkerHealthTone
   detail: string
 } {
   if (!worker) {
-    return { state: 'OFFLINE', tone: 'red', detail: 'No telemetry received yet.' }
+    return { state: 'OFFLINE', tone: 'red', detail: t('workers.noTelemetry') }
   }
 
   const control = (worker.control || {}) as Record<string, any>
@@ -385,21 +388,127 @@ function resolveWorkerHealth(worker?: WorkerStatus): {
     return {
       state: 'PAUSED',
       tone: 'amber',
-      detail: String(worker.current_activity || 'Paused by operator'),
+      detail: String(worker.current_activity || t('workers.pausedByOperator')),
     }
   }
   if (running || (enabled && !paused && activeHint)) {
     return {
       state: 'RUNNING',
       tone: 'green',
-      detail: String(worker.current_activity || 'Healthy'),
+      detail: String(worker.current_activity || t('workers.healthy')),
     }
   }
   return {
     state: 'IDLE',
     tone: 'amber',
-    detail: String(worker.current_activity || 'Idle'),
+    detail: String(worker.current_activity || t('workers.idleDetail')),
   }
+}
+
+// Backend workers publish English `current_activity` phrases; map the known
+// ones to i18n keys at render time and fall back to the raw string.
+const WORKER_ACTIVITY_EXACT: Record<string, string> = {
+  'Blocked: live credentials missing': 'workers.activity.blockedNoCreds',
+  'Blocked: live trading service initializing': 'workers.activity.blockedInitializing',
+  'Boot invariant failed — refusing to redeem': 'workers.activity.bootInvariantFailed',
+  'Disabled': 'workers.activity.disabled',
+  'Discovery worker started; first run pending.': 'workers.activity.discoveryStarted',
+  'Idle - no active news traders.': 'workers.activity.idleNoNewsTraders',
+  'Idle - waiting for next collection cycle.': 'workers.activity.idleNextCollection',
+  'Idle - waiting for next discovery cycle.': 'workers.activity.idleNextDiscovery',
+  'Idle - waiting for next news workflow cycle.': 'workers.activity.idleNextNews',
+  'Idle - waiting for next weather workflow cycle.': 'workers.activity.idleNextWeather',
+  'Idle - tracked-traders cycle complete.': 'workers.activity.idleTrackedComplete',
+  'Tracked traders strategy cycle complete.': 'workers.activity.trackedCycleComplete',
+  'Live start command queued from Telegram': 'workers.activity.liveStartQueued',
+  'Manual stop requested from Telegram': 'workers.activity.manualStopTelegram',
+  'News worker started; first cycle pending.': 'workers.activity.newsStarted',
+  'Paused': 'workers.activity.pausedShort',
+  'Redeemer cycle timed out': 'workers.activity.redeemerTimeout',
+  'Running news workflow cycle...': 'workers.activity.runningNewsCycle',
+  'Running events data-source cycle...': 'workers.activity.runningEventsCycle',
+  'Scanning trader wallets...': 'workers.activity.scanningWallets',
+  'Start command queued from Telegram': 'workers.activity.startQueued',
+  'Tracked-traders worker started; first cycle pending.': 'workers.activity.trackedStarted',
+  'Waiting for orchestrator cycle lock': 'workers.activity.waitingOrchestratorLock',
+  'Waiting for trader orchestrator worker.': 'workers.activity.waitingOrchestrator',
+  'Waiting for discovery worker.': 'workers.activity.waitingDiscoveryWorker',
+  'Weather worker started; first scan pending.': 'workers.activity.weatherStarted',
+  'Worker booting': 'workers.activity.workerBooting',
+  'Worker error': 'workers.activity.workerError',
+  'Waiting for worker startup.': 'workers.activity.waitingStartup',
+  'Evaluating scanner freshness and coverage SLOs...': 'workers.activity.sloEvaluating',
+  'Resumed in shadow on application startup': 'workers.activity.resumedShadow',
+  'Scanner started; first scan pending.': 'workers.activity.scannerStarted',
+  'Scanner cycle timeout; retaining last known opportunities.': 'workers.activity.scannerCycleTimeout',
+  'Upstream market API DNS/network error; retaining last known opportunities.': 'workers.activity.scannerUpstreamDns',
+  'Disabled by EVENTS_ENABLED setting': 'workers.activity.disabledByEventsSetting',
+  'Catalog refresh: fetching Polymarket events and markets...': 'workers.activity.catalogPoly',
+  'Catalog refresh: fetching Kalshi markets...': 'workers.activity.catalogKalshi',
+  'Catalog incremental sync: fetching market/event deltas...': 'workers.activity.catalogIncremental',
+  'Fast scan: preparing market batch...': 'workers.activity.fastScanPreparing',
+  'Heavy lane: no qualifying markets': 'workers.activity.heavyNoQualifying',
+  'Reactive scan triggered by WS price change': 'workers.activity.reactiveScan',
+  'Waiting for catalog refresh...': 'workers.activity.waitingCatalog',
+  'Starting': 'workers.activity.starting',
+  'Live': 'workers.activity.liveShort',
+}
+
+const WORKER_ACTIVITY_PATTERNS: Array<{
+  re: RegExp
+  key: string
+  args: string[]
+}> = [
+  {
+    re: /^(Last cycle error|Last scan error|Last tracked-traders cycle error|Catalog refresh error|Fast scan error|Heavy lane error):\s*(.*)$/,
+    key: 'workers.activity.errorTail',
+    args: ['tail'],
+  },
+  { re: /^Heavy lane degraded:\s*(.+)$/, key: 'workers.activity.heavyDegraded', args: ['detail'] },
+  { re: /^Heavy lane: running full-snapshot chunk (\d+)-(\d+)\/(\d+) \((\d+) markets\)/, key: 'workers.activity.heavyChunk', args: ['start', 'end', 'total', 'count'] },
+  { re: /^DryRun=(\d+), resolved=(\d+), failed=(\d+)/, key: 'workers.activity.dryRunSummary', args: ['redeemed', 'resolved', 'failed'] },
+  { re: /^Redeem=(\d+), resolved=(\d+), failed=(\d+)/, key: 'workers.activity.redeemSummary', args: ['redeemed', 'resolved', 'failed'] },
+  { re: /^Scanner resumed with (\d+) restored opportunities/, key: 'workers.activity.scannerResumed', args: ['count'] },
+  { re: /^Degraded: waiting for stuck iteration \((\d+)s\)$/, key: 'workers.activity.degradedStuck', args: ['seconds'] },
+  { re: /^Catalog refresh complete — (\d+) events, (\d+) markets$/, key: 'workers.activity.catalogComplete', args: ['events', 'markets'] },
+  { re: /^Catalog: (\d+) events, (\d+) active markets$/, key: 'workers.activity.catalogSummary', args: ['events', 'markets'] },
+  { re: /^Catalog refresh: reading prices for (\d+) tokens\.\.\.$/, key: 'workers.activity.catalogPrices', args: ['tokens'] },
+  { re: /^Fast scan: (\d+) markets unchanged, skipping$/, key: 'workers.activity.fastScanUnchanged', args: ['count'] },
+  { re: /^Idle — next scan in ≤(\d+)s/, key: 'workers.activity.idleNextScan', args: ['seconds'] },
+  {
+    re: /^Reconciled (\d+)\/(\d+) traders, provider_updates=(\d+), positions_closed=(\d+)/,
+    key: 'workers.activity.reconciled',
+    args: ['processed', 'seen', 'updates', 'closed'],
+  },
+  { re: /^Startup full sync processed=(\d+)\/(\d+)$/, key: 'workers.activity.startupSync', args: ['processed', 'seen'] },
+]
+
+function translateWorkerActivity(
+  activity: string,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string {
+  const raw = String(activity || '').trim()
+  if (!raw) return raw
+  const exactKey = WORKER_ACTIVITY_EXACT[raw]
+  if (exactKey) return t(exactKey, { defaultValue: raw })
+  for (const { re, key, args } of WORKER_ACTIVITY_PATTERNS) {
+    const match = raw.match(re)
+    if (match) {
+      const opts: Record<string, unknown> = { defaultValue: raw }
+      args.forEach((name, index) => {
+        opts[name] = match[index + 1]
+      })
+      return t(key, opts)
+    }
+  }
+  return raw
+}
+
+function workerStateLabel(
+  state: string,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string {
+  return t(`workers.state.${String(state || '').toLowerCase()}`, { defaultValue: state })
 }
 
 function App() {
@@ -997,7 +1106,7 @@ function App() {
     const workerNames = WORKER_HEALTH_ORDER.filter((workerName) => byName.has(workerName))
     const rows = workerNames.map((workerName) => {
       const worker = byName.get(workerName)
-      const resolved = resolveWorkerHealth(worker)
+      const resolved = resolveWorkerHealth(worker, t)
       const orchestratorPaused = workerName === 'trader_orchestrator'
         && Boolean((worker?.control || {}).is_paused)
         && resolved.state === 'PAUSED'
@@ -1027,14 +1136,14 @@ function App() {
       overallTone,
       counts: { green, amber, red, total: rows.length },
     }
-  }, [managedWorkers])
+  }, [managedWorkers, t])
 
   const tradingVpnHealth = useMemo(() => {
     if (tradingVpnStatusLoading && !tradingVpnStatus) {
       return {
         state: 'CHECKING',
         tone: 'amber' as WorkerHealthTone,
-        detail: 'Checking trading VPN status.',
+        detail: t('workers.vpnChecking'),
       }
     }
 
@@ -1042,7 +1151,7 @@ function App() {
       return {
         state: 'ERROR',
         tone: 'red' as WorkerHealthTone,
-        detail: tradingVpnStatusError instanceof Error ? tradingVpnStatusError.message : 'VPN status request failed.',
+        detail: tradingVpnStatusError instanceof Error ? tradingVpnStatusError.message : t('workers.vpnRequestFailed'),
       }
     }
 
@@ -1050,7 +1159,7 @@ function App() {
       return {
         state: 'UNKNOWN',
         tone: 'amber' as WorkerHealthTone,
-        detail: 'Trading VPN status unavailable.',
+        detail: t('workers.vpnUnavailable'),
       }
     }
 
@@ -1058,7 +1167,7 @@ function App() {
       return {
         state: 'OFF',
         tone: 'amber' as WorkerHealthTone,
-        detail: 'Trading proxy disabled in settings.',
+        detail: t('workers.vpnDisabled'),
       }
     }
 
@@ -1066,7 +1175,7 @@ function App() {
       return {
         state: 'DOWN',
         tone: 'red' as WorkerHealthTone,
-        detail: String(tradingVpnStatus.proxy_ip_error || tradingVpnStatus.error || 'Proxy unreachable.'),
+        detail: String(tradingVpnStatus.proxy_ip_error || tradingVpnStatus.error || t('workers.vpnUnreachable')),
       }
     }
 
@@ -1074,7 +1183,7 @@ function App() {
       return {
         state: 'ACTIVE',
         tone: 'green' as WorkerHealthTone,
-        detail: tradingVpnStatus.proxy_ip ? `Trading through ${tradingVpnStatus.proxy_ip}` : 'Proxy reachable and active.',
+        detail: tradingVpnStatus.proxy_ip ? t('workers.vpnTradingThrough', { ip: tradingVpnStatus.proxy_ip }) : t('workers.vpnActive'),
       }
     }
 
@@ -1082,16 +1191,16 @@ function App() {
       return {
         state: 'WARN',
         tone: 'amber' as WorkerHealthTone,
-        detail: `Proxy IP matches direct IP (${tradingVpnStatus.proxy_ip}).`,
+        detail: t('workers.vpnIpMatches', { ip: tradingVpnStatus.proxy_ip }),
       }
     }
 
     return {
       state: 'WARN',
       tone: 'amber' as WorkerHealthTone,
-      detail: 'Proxy reachable but VPN may not be active.',
+      detail: t('workers.vpnMayBeInactive'),
     }
-  }, [tradingVpnStatus, tradingVpnStatusError, tradingVpnStatusLoading])
+  }, [tradingVpnStatus, tradingVpnStatusError, tradingVpnStatusLoading, t])
 
   const workerAndVpnTone = useMemo<WorkerHealthTone>(() => {
     if (workerHealth.overallTone === 'red' || tradingVpnHealth.tone === 'red') {
@@ -1646,7 +1755,7 @@ function App() {
     || opportunitiesView === 'search'
     || opportunitiesView === 'weather'
     || opportunitiesView === 'traders'
-  const analyzeActionLabel = analyzeScope === 'visible' ? 'Analyze Visible' : 'Analyze All'
+  const analyzeActionLabel = analyzeScope === 'visible' ? t('opportunities.analyzeVisible') : t('opportunities.analyzeAll')
   const showTopSettingsControl =
     opportunitiesView === 'scanner'
     || opportunitiesView === 'crypto'
@@ -1700,12 +1809,12 @@ function App() {
 
   const SOURCE_GROUP_ORDER = ['scanner', 'weather', 'news', 'crypto', 'traders', 'manual'] as const
   const SOURCE_GROUP_LABELS: Record<string, string> = {
-    scanner: 'Scanner',
-    weather: 'Weather',
-    news: 'News',
-    crypto: 'Crypto',
-    traders: 'Traders',
-    manual: 'Manual',
+    scanner: 'opportunities.sourceScanner',
+    weather: 'opportunities.sourceWeather',
+    news: 'opportunities.sourceNews',
+    crypto: 'opportunities.sourceCrypto',
+    traders: 'opportunities.sourceTraders',
+    manual: 'opportunities.sourceManual',
   }
   const groupedStrategies = useMemo(() => {
     const groups: Record<string, typeof visibleStrategies> = {}
@@ -1874,13 +1983,13 @@ function App() {
           <div className="hidden md:flex items-center gap-1 text-xs ml-3">
             <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
               <Briefcase className="w-3 h-3 text-emerald-400" />
-              <span className="text-muted-foreground">Value</span>
+              <span className="text-muted-foreground">{t('header.value')}</span>
               <FlashNumber value={headerStats.portfolioValue} prefix="$" decimals={2} className="font-data font-semibold text-foreground data-glow-green" />
             </div>
             <div className="text-border/60 mx-0.5">|</div>
             <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
               <Wallet className="w-3 h-3 text-blue-400" />
-              <span className="text-muted-foreground">Bal</span>
+              <span className="text-muted-foreground">{t('header.balance')}</span>
               <FlashNumber value={headerStats.balance} prefix="$" decimals={2} className="font-data font-semibold text-foreground data-glow-blue" />
             </div>
             <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
@@ -1895,7 +2004,7 @@ function App() {
             </div>
             <div className="stat-pill flex items-center gap-1 px-2 py-1 rounded-md">
               <Activity className="w-3 h-3 text-purple-400" />
-              <span className="text-muted-foreground">Pos</span>
+              <span className="text-muted-foreground">{t('header.positions')}</span>
               <AnimatedNumber value={headerStats.positions} decimals={0} className="font-data font-semibold text-foreground" />
             </div>
           </div>
@@ -1927,7 +2036,7 @@ function App() {
                       headerSearchRef.current?.blur()
                     }
                   }}
-                  placeholder="Search markets, wallets, traders..."
+                  placeholder={t('header.searchPlaceholder')}
                   className="w-full h-7 pl-8 pr-12 text-xs bg-card/60 border border-border/50 rounded-md text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-green-500/40 focus:bg-card transition-colors"
                 />
                 <kbd className="absolute right-2 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-[9px] font-data bg-muted/50 rounded border border-border/50 text-muted-foreground">
@@ -1947,7 +2056,7 @@ function App() {
                   >
                     <Globe className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <span className="text-foreground">Search markets for </span>
+                      <span className="text-foreground">{t('commandBar.searchMarketsFor')} </span>
                       <span className="text-blue-400 font-medium truncate">&quot;{headerSearchQuery.trim()}&quot;</span>
                     </div>
                     <kbd className="px-1 py-0.5 text-[9px] font-data bg-muted/50 rounded border border-border/50 text-muted-foreground shrink-0">Enter</kbd>
@@ -1965,7 +2074,7 @@ function App() {
                   >
                     <Target className="w-3.5 h-3.5 text-green-400 shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <span className="text-foreground">Filter opportunities for </span>
+                      <span className="text-foreground">{t('commandBar.filterOpportunitiesFor')} </span>
                       <span className="text-green-400 font-medium truncate">&quot;{headerSearchQuery.trim()}&quot;</span>
                     </div>
                   </button>
@@ -1984,7 +2093,7 @@ function App() {
                     >
                       <Wallet className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
                       <div className="flex-1 min-w-0">
-                        <span className="text-foreground">Analyze wallet </span>
+                        <span className="text-foreground">{t('commandBar.analyzeWallet')} </span>
                         <span className="text-yellow-400 font-medium font-data truncate">{headerSearchQuery.trim().slice(0, 10)}...{headerSearchQuery.trim().slice(-4)}</span>
                       </div>
                     </button>
@@ -2013,7 +2122,7 @@ function App() {
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Worker and VPN status"
+                  aria-label={t('workers.ariaLabel')}
                   className="h-8 w-8 rounded-md border border-border/60 bg-card/60 hover:bg-card/90 transition-colors flex items-center justify-center cursor-help"
                 >
                   <span className={cn("h-2.5 w-2.5 rounded-full", WORKER_TONE_CLASS[workerAndVpnTone])} />
@@ -2024,7 +2133,7 @@ function App() {
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                     <span>{t('workers.workerHealth')}</span>
                     <span className="font-data">
-                      {workerHealth.counts.green}/{workerHealth.counts.total} green
+                      {t('workers.healthyCount', { green: workerHealth.counts.green, total: workerHealth.counts.total })}
                     </span>
                   </div>
                   <div className="space-y-1">
@@ -2034,7 +2143,7 @@ function App() {
                           <span className={cn("h-1.5 w-1.5 rounded-full", WORKER_TONE_CLASS[tradingVpnHealth.tone])} />
                           <span>{t('workers.tradingVpn')}</span>
                         </span>
-                        <span className="font-data text-muted-foreground">{tradingVpnHealth.state}</span>
+                        <span className="font-data text-muted-foreground">{workerStateLabel(tradingVpnHealth.state, t)}</span>
                       </div>
                       <p className="mt-1 text-[10px] text-muted-foreground truncate">{tradingVpnHealth.detail}</p>
                     </div>
@@ -2045,9 +2154,9 @@ function App() {
                             <span className={cn("h-1.5 w-1.5 rounded-full", WORKER_TONE_CLASS[worker.tone])} />
                             <span>{worker.label}</span>
                           </span>
-                          <span className="font-data text-muted-foreground">{worker.state}</span>
+                          <span className="font-data text-muted-foreground">{workerStateLabel(worker.state, t)}</span>
                         </div>
-                        <p className="mt-1 text-[10px] text-muted-foreground truncate">{worker.detail}</p>
+                        <p className="mt-1 text-[10px] text-muted-foreground truncate">{translateWorkerActivity(worker.detail, t)}</p>
                       </div>
                     ))}
                   </div>
@@ -2072,7 +2181,7 @@ function App() {
                   )}
                 >
                   {globallyPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
-                  {globallyPaused ? 'Resume' : 'Pause'}
+                  {globallyPaused ? t('header.resume') : t('header.pause')}
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
@@ -2270,7 +2379,7 @@ function App() {
                             className="gap-1.5 text-xs h-8 bg-card text-muted-foreground hover:text-orange-400 border-border hover:border-orange-500/30"
                           >
                             <Settings className="w-3.5 h-3.5" />
-                            Settings
+                            {t('nav.settings')}
                           </Button>
                         )}
 
@@ -2291,7 +2400,7 @@ function App() {
                               ) : (
                                 <Brain className="w-3 h-3" />
                               )}
-                              {analyzeAllMutation.isPending ? 'Analyzing...' : analyzeActionLabel}
+                              {analyzeAllMutation.isPending ? t('opportunities.analyzing') : analyzeActionLabel}
                             </Button>
                             <Button
                               size="sm"
@@ -2349,14 +2458,14 @@ function App() {
                       {polySearchLoading ? (
                         <div className="flex items-center justify-center py-12">
                           <RefreshCw className="w-8 h-8 animate-spin text-blue-400" />
-                          <span className="ml-3 text-muted-foreground">Searching...</span>
+                          <span className="ml-3 text-muted-foreground">{t('opportunities.searching')}</span>
                         </div>
                       ) : polymarketResults.length === 0 ? (
                         <div className="text-center py-12">
                           <AlertCircle className="w-12 h-12 text-muted-foreground/50 mx-auto mb-4" />
-                          <p className="text-muted-foreground">No markets found for &quot;{polymarketSearchSubmitted}&quot;</p>
+                          <p className="text-muted-foreground">{t('opportunities.noMarketsFound', { query: polymarketSearchSubmitted })}</p>
                           <p className="text-sm text-muted-foreground/70 mt-1">
-                            Try different keywords or broader search terms
+                            {t('opportunities.tryDifferentKeywords')}
                           </p>
                         </div>
                       ) : (
@@ -2422,7 +2531,7 @@ function App() {
                                 ) : (
                                   <Zap className="w-3 h-3" />
                                 )}
-                                {evaluateMutation.isPending ? 'Scanning...' : evalStatus === 'done' ? 'Scan Running' : 'Run Strategies'}
+                                {evaluateMutation.isPending ? t('opportunities.scanning') : evalStatus === 'done' ? t('opportunities.scanRunning') : t('opportunities.runStrategies')}
                               </Button>
                             </div>
                           </div>
@@ -2434,22 +2543,15 @@ function App() {
                                 <label className="block text-[10px] text-muted-foreground mb-1 uppercase tracking-wider">{t('common.category')}</label>
                                 <Select value={selectedCategory || '_all'} onValueChange={(v) => setSelectedCategory(v === '_all' ? '' : v)}>
                                   <SelectTrigger className="w-full bg-card border-border h-8 text-sm">
-                                    <SelectValue placeholder="All Categories" />
+                                    <SelectValue placeholder={t('opportunities.allCategories')} />
                                   </SelectTrigger>
                                   <SelectContent>
                                     <SelectItem value="_all">{t('opportunities.allCategories')}</SelectItem>
                                     {[
-                                      { value: 'politics', label: 'Politics' },
-                                      { value: 'sports', label: 'Sports' },
-                                      { value: 'crypto', label: 'Crypto' },
-                                      { value: 'culture', label: 'Culture' },
-                                      { value: 'economics', label: 'Economics' },
-                                      { value: 'tech', label: 'Tech' },
-                                      { value: 'finance', label: 'Finance' },
-                                      { value: 'weather', label: 'Weather' },
-                                    ].map((cat) => (
-                                      <SelectItem key={cat.value} value={cat.value}>
-                                        {cat.label}
+                                      'politics', 'sports', 'crypto', 'culture', 'economics', 'tech', 'finance', 'weather',
+                                    ].map((value) => (
+                                      <SelectItem key={value} value={value}>
+                                        {t('discoveryPanel.category.' + value)}
                                       </SelectItem>
                                     ))}
                                   </SelectContent>
@@ -2606,7 +2708,7 @@ function App() {
                           <Separator />
                           <div className="flex items-center justify-between pt-4">
                             <div className="text-xs text-muted-foreground">
-                              {currentPage * ITEMS_PER_PAGE + 1} - {Math.min((currentPage + 1) * ITEMS_PER_PAGE, displayOpportunities.length)} of {displayOpportunities.length}
+                              {t('opportunities.paginationInfo', { from: currentPage * ITEMS_PER_PAGE + 1, to: Math.min((currentPage + 1) * ITEMS_PER_PAGE, displayOpportunities.length), total: displayOpportunities.length })}
                             </div>
                             <div className="flex items-center gap-2">
                               <Button
@@ -2617,7 +2719,7 @@ function App() {
                                 disabled={currentPage === 0}
                               >
                                 <ChevronLeft className="w-3.5 h-3.5" />
-                                Prev
+                                {t('opportunities.prevPage')}
                               </Button>
                               <span className="px-2.5 py-1 bg-card rounded-lg text-xs border border-border font-mono">
                                 {currentPage + 1}/{Math.max(1, Math.ceil(displayOpportunities.length / ITEMS_PER_PAGE))}
@@ -2629,7 +2731,7 @@ function App() {
                                 onClick={() => setCurrentPage(p => p + 1)}
                                 disabled={currentPage >= Math.ceil(displayOpportunities.length / ITEMS_PER_PAGE) - 1}
                               >
-                                Next
+                                {t('opportunities.nextPage')}
                                 <ChevronRight className="w-3.5 h-3.5" />
                               </Button>
                             </div>
@@ -2646,7 +2748,7 @@ function App() {
                             <Search className="absolute left-2.5 top-1/2 transform -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
                             <Input
                               type="text"
-                              placeholder="Search markets..."
+                              placeholder={t('opportunities.searchMarketsPlaceholder')}
                               value={searchQuery}
                               onChange={(e) => setSearchQuery(e.target.value)}
                               className="pl-8 bg-card border-border h-8 text-xs"
@@ -2655,13 +2757,13 @@ function App() {
 
                           <Select value={selectedStrategy || '_all'} onValueChange={(v) => setSelectedStrategy(v === '_all' ? '' : v)}>
                             <SelectTrigger className="w-[170px] shrink-0 bg-card border-border h-8 text-xs">
-                              <SelectValue placeholder="Strategy" />
+                              <SelectValue placeholder={t('opportunities.strategyPlaceholder')} />
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="_all">{t('opportunities.allDetectors')}</SelectItem>
                               {groupedStrategies.map((group) => (
                                 <SelectGroup key={group.key}>
-                                  <SelectLabel className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium px-2 py-1">{group.label}</SelectLabel>
+                                  <SelectLabel className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium px-2 py-1">{t(group.label, { defaultValue: group.key })}</SelectLabel>
                                   {group.strategies.map((s) => (
                                     <SelectItem
                                       key={s.type}
@@ -2686,7 +2788,7 @@ function App() {
                             onClick={() => setShowZeroCountStrategies((value) => !value)}
                             className="shrink-0 h-8 text-[11px] px-2.5"
                           >
-                            {showZeroCountStrategies ? 'Hide Empty' : 'Show Empty'}
+                            {showZeroCountStrategies ? t('opportunities.hideEmpty') : t('opportunities.showEmpty')}
                           </Button>
 
                           {selectedStrategy && strategySubtypeOptions.length > 0 && (
@@ -2695,7 +2797,7 @@ function App() {
                               onValueChange={(v) => setSelectedStrategySubtype(v === '_all' ? '' : v)}
                             >
                               <SelectTrigger className="w-[200px] shrink-0 bg-card border-border h-8 text-xs">
-                                <SelectValue placeholder="Subfilter" />
+                                <SelectValue placeholder={t('opportunities.subfilterPlaceholder')} />
                               </SelectTrigger>
                               <SelectContent>
                                 <SelectItem value="_all">{t('opportunities.allSubfilters')}</SelectItem>
@@ -2718,30 +2820,23 @@ function App() {
 
                           <Select value={selectedCategory || '_all'} onValueChange={(v) => setSelectedCategory(v === '_all' ? '' : v)}>
                             <SelectTrigger className="w-[155px] shrink-0 bg-card border-border h-8 text-xs">
-                              <SelectValue placeholder="Category" />
+                              <SelectValue placeholder={t('opportunities.categoryPlaceholder')} />
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="_all">{t('opportunities.allCategories')}</SelectItem>
                               {[
-                                { value: 'politics', label: 'Politics' },
-                                { value: 'sports', label: 'Sports' },
-                                { value: 'crypto', label: 'Crypto' },
-                                { value: 'culture', label: 'Culture' },
-                                { value: 'economics', label: 'Economics' },
-                                { value: 'tech', label: 'Tech' },
-                                { value: 'finance', label: 'Finance' },
-                                { value: 'weather', label: 'Weather' },
-                              ].map((cat) => (
+                                'politics', 'sports', 'crypto', 'culture', 'economics', 'tech', 'finance', 'weather',
+                              ].map((value) => (
                                 <SelectItem
-                                  key={cat.value}
-                                  value={cat.value}
-                                  suffix={categoryCounts[cat.value] != null ? (
+                                  key={value}
+                                  value={value}
+                                  suffix={categoryCounts[value] != null ? (
                                     <span className="ml-auto pl-2 inline-flex items-center justify-center rounded-full bg-primary/15 text-primary text-[10px] font-medium min-w-[20px] h-4 px-1.5">
-                                      {categoryCounts[cat.value]}
+                                      {categoryCounts[value]}
                                     </span>
                                   ) : undefined}
                                 >
-                                  {cat.label}
+                                  {t('discoveryPanel.category.' + value)}
                                 </SelectItem>
                               ))}
                             </SelectContent>
@@ -2753,7 +2848,7 @@ function App() {
                             onChange={(e) => setMinProfit(parseFloat(e.target.value) || 0)}
                             step={0.5}
                             min={0}
-                            placeholder="Min %"
+                            placeholder={t('opportunities.minProfitPlaceholder')}
                             className="w-[84px] shrink-0 bg-card border-border h-8 text-xs"
                           />
 
@@ -2781,13 +2876,13 @@ function App() {
                             }}
                           >
                             <SelectTrigger className="w-[130px] shrink-0 bg-card border-border h-8 text-xs">
-                              <SelectValue placeholder="Sort" />
+                              <SelectValue placeholder={t('opportunities.sortPlaceholder')} />
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="roi">ROI</SelectItem>
                               <SelectItem value="ai_score">{t('opportunities.aiScore')}</SelectItem>
                               <SelectItem value="profit">{t('opportunities.profit')}</SelectItem>
-                              <SelectItem value="liquidity">Liquidity</SelectItem>
+                              <SelectItem value="liquidity">{t('opportunities.sortLiquidity')}</SelectItem>
                               <SelectItem value="risk">{t('opportunities.risk')}</SelectItem>
                             </SelectContent>
                           </Select>
@@ -2797,7 +2892,7 @@ function App() {
                             variant="outline"
                             onClick={() => setSortDir((d) => d === 'desc' ? 'asc' : 'desc')}
                             className="w-8 h-8 p-0 shrink-0"
-                            title={`Sort direction: ${sortDir === 'desc' ? 'descending' : 'ascending'}`}
+                            title={sortDir === 'desc' ? t('opportunities.sortDirectionDesc') : t('opportunities.sortDirectionAsc')}
                           >
                             {sortDir === 'desc' ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
                           </Button>
@@ -2810,7 +2905,7 @@ function App() {
                             className="text-xs gap-1.5 h-8 px-2.5 shrink-0 whitespace-nowrap"
                           >
                             <RefreshCw className={cn("w-3 h-3", isRefreshingMarkets && "animate-spin")} />
-                            Refresh
+                            {t('opportunities.refresh')}
                           </Button>
 
                         </div>
@@ -2901,7 +2996,7 @@ function App() {
 
             {/* ==================== Data ==================== */}
             {activeTab === 'data' && (
-              <Suspense fallback={<PanelFallback label="Loading data workspace" />}>
+              <Suspense fallback={<PanelFallback label={t('app.loadingDataWorkspace')} />}>
                 <DataPanel
                   isConnected={isConnected}
                   view={dataView}
@@ -2915,7 +3010,7 @@ function App() {
             {activeTab === 'trading' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <Suspense fallback={<PanelFallback label="Loading trading workspace" />}>
+                  <Suspense fallback={<PanelFallback label={t('app.loadingTradingWorkspace')} />}>
                     <TradingPanel isConnected={isConnected} />
                   </Suspense>
                 </div>
@@ -2926,7 +3021,7 @@ function App() {
             {activeTab === 'strategies' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <Suspense fallback={<PanelFallback label="Loading strategies" />}>
+                  <Suspense fallback={<PanelFallback label={t('app.loadingStrategies')} />}>
                     <StrategiesPanel
                       initialSourceFilter={pendingStrategiesSourceFilter}
                       onSourceFilterApplied={() => setPendingStrategiesSourceFilter(null)}
@@ -2941,7 +3036,7 @@ function App() {
             {activeTab === 'accounts' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <Suspense fallback={<PanelFallback label="Loading accounts" />}>
+                  <Suspense fallback={<PanelFallback label={t('app.loadingAccounts')} />}>
                     <AccountsPanel onOpenSettings={() => setAccountSettingsOpen(true)} />
                   </Suspense>
                 </div>
@@ -3048,7 +3143,7 @@ function App() {
                   )}
                 >
                   <div className={tradersSubTab === 'discovery' ? '' : 'hidden'}>
-                    <Suspense fallback={<PanelFallback label="Loading discovery" />}>
+                    <Suspense fallback={<PanelFallback label={t('app.loadingDiscovery')} />}>
                       <DiscoveryPanel
                         view="discovery"
                         onAnalyzeWallet={handleAnalyzeWallet}
@@ -3056,7 +3151,7 @@ function App() {
                     </Suspense>
                   </div>
                   <div className={tradersSubTab === 'pool' ? '' : 'hidden'}>
-                    <Suspense fallback={<PanelFallback label="Loading pool" />}>
+                    <Suspense fallback={<PanelFallback label={t('app.loadingPool')} />}>
                       <DiscoveryPanel
                         view="pool"
                         onAnalyzeWallet={handleAnalyzeWallet}
@@ -3080,7 +3175,7 @@ function App() {
                     />
                   </div>
                   <div className={cn("h-full min-h-0", tradersSubTab === 'graph' ? '' : 'hidden')}>
-                    <Suspense fallback={<PanelFallback label="Loading network graph" />}>
+                    <Suspense fallback={<PanelFallback label={t('app.loadingNetworkGraph')} />}>
                       <TradersNetworkPanel
                         onAnalyzeWallet={handleAnalyzeWallet}
                         onNavigateToWallet={(address) => {
@@ -3091,7 +3186,7 @@ function App() {
                     </Suspense>
                   </div>
                   <div className={cn("h-full min-h-0", tradersSubTab === 'manage' ? '' : 'hidden')}>
-                    <Suspense fallback={<PanelFallback label="Loading profile manager" />}>
+                    <Suspense fallback={<PanelFallback label={t('app.loadingProfileManager')} />}>
                       <DiscoveryProfilesManager />
                     </Suspense>
                   </div>
@@ -3103,7 +3198,7 @@ function App() {
             {activeTab === 'positions' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <Suspense fallback={<PanelFallback label="Loading positions" />}>
+                  <Suspense fallback={<PanelFallback label={t('app.loadingPositions')} />}>
                     <PositionsPanel />
                   </Suspense>
                 </div>
@@ -3114,7 +3209,7 @@ function App() {
             {activeTab === 'performance' && (
               <div className="flex-1 overflow-hidden flex flex-col section-enter">
                 <div className="flex-1 overflow-hidden px-6 py-4 min-h-0">
-                  <Suspense fallback={<PanelFallback label="Loading performance" />}>
+                  <Suspense fallback={<PanelFallback label={t('app.loadingPerformance')} />}>
                     <PerformancePanel />
                   </Suspense>
                 </div>
@@ -3135,7 +3230,7 @@ function App() {
             {/* ==================== Settings ==================== */}
             {activeTab === 'settings' && (
               <div className="flex-1 overflow-y-auto px-6 py-5 section-enter">
-                <Suspense fallback={<PanelFallback label="Loading settings" />}>
+                <Suspense fallback={<PanelFallback label={t('app.loadingSettings')} />}>
                   <SettingsPanel />
                 </Suspense>
               </div>
@@ -3161,7 +3256,7 @@ function App() {
                   </kbd>
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="left">AI Copilot (Ctrl+.)</TooltipContent>
+              <TooltipContent side="left">{t('app.aiCopilotTooltip')}</TooltipContent>
             </Tooltip>
           </div>
         )}

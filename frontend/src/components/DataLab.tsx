@@ -983,7 +983,7 @@ function MicrostructureRecorderSection() {
                 recordingEnabled ? 'bg-emerald-400' : 'bg-rose-400',
               )}
             />
-            {recordingEnabled ? 'Recording ON' : 'Recording OFF'}
+            {recordingEnabled ? t('dataLab.recordingOn') : t('dataLab.recordingOff')}
           </Button>
           <Button
             size="sm"

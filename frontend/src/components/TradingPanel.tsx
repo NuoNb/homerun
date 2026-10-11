@@ -1,6 +1,7 @@
 import { Fragment, lazy, Suspense, type ReactNode, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
+import i18n from '../i18n'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
@@ -1570,7 +1571,7 @@ function collectOrderMarketAliasIds(order: TraderOrder): string[] {
 
 function compactText(value: string | null | undefined, maxChars = 96): string {
   const text = cleanText(value)
-  if (!text) return 'No reason provided'
+  if (!text) return i18n.t('tradingPanel.reasonNotProvided')
   if (text.length <= maxChars) return text
   return `${text.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`
 }
@@ -1691,7 +1692,7 @@ function resolveTraderStatusPresentation(
 
 function titleCaseStatusLabel(value: string): string {
   const normalized = String(value || '').trim().toLowerCase()
-  if (!normalized) return 'Unknown'
+  if (!normalized) return i18n.t('tradingPanel.unknown')
   return normalized
     .split('_')
     .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
@@ -1699,19 +1700,19 @@ function titleCaseStatusLabel(value: string): string {
 }
 
 function resolveOrderLifecycleLabel(status: string): string {
-  if (status === 'submitted' || status === 'pending' || status === 'queued') return 'Submitted'
-  if (status === 'open') return 'Working'
-  if (status === 'executed') return 'Filled'
-  if (status === 'cancelled') return 'Canceled'
-  if (status === 'rejected') return 'Rejected'
-  if (status === 'failed' || status === 'error') return 'Failed'
-  if (status === 'resolved_win') return 'Settled (Profit)'
-  if (status === 'resolved_loss') return 'Settled (Loss)'
-  if (status === 'closed_win') return 'Closed (Profit)'
-  if (status === 'closed_loss') return 'Closed (Loss)'
-  if (status === 'win') return 'Settled (Profit)'
-  if (status === 'loss') return 'Settled (Loss)'
-  if (status === 'resolved') return 'Settled'
+  if (status === 'submitted' || status === 'pending' || status === 'queued') return i18n.t('tradingPanel.lifecycle.submitted')
+  if (status === 'open') return i18n.t('tradingPanel.lifecycle.working')
+  if (status === 'executed') return i18n.t('tradingPanel.lifecycle.filled')
+  if (status === 'cancelled') return i18n.t('tradingPanel.lifecycle.canceled')
+  if (status === 'rejected') return i18n.t('tradingPanel.lifecycle.rejected')
+  if (status === 'failed' || status === 'error') return i18n.t('tradingPanel.lifecycle.failed')
+  if (status === 'resolved_win') return i18n.t('tradingPanel.lifecycle.settledProfit')
+  if (status === 'resolved_loss') return i18n.t('tradingPanel.lifecycle.settledLoss')
+  if (status === 'closed_win') return i18n.t('tradingPanel.lifecycle.closedProfit')
+  if (status === 'closed_loss') return i18n.t('tradingPanel.lifecycle.closedLoss')
+  if (status === 'win') return i18n.t('tradingPanel.lifecycle.settledProfit')
+  if (status === 'loss') return i18n.t('tradingPanel.lifecycle.settledLoss')
+  if (status === 'resolved') return i18n.t('tradingPanel.lifecycle.settled')
   return titleCaseStatusLabel(status)
 }
 
@@ -2345,20 +2346,20 @@ function orderReasonDetail(order: TraderOrder): string {
     || (payload ? cleanText(payload.message) : null)
     || (legPayload ? cleanText(legPayload.reason) : null)
     || closeLifecycleReason
-    || (status === 'executed' ? 'Execution filled' : 'No reason provided')
+    || (status === 'executed' ? i18n.t('tradingPanel.reasonExecutionFilled') : i18n.t('tradingPanel.reasonNotProvided'))
   )
 }
 
 function orderCloseHeadlineFromReason(reason: string): string {
   const normalizedReason = reason.toLowerCase()
-  if (normalizedReason.includes('stop loss')) return 'Stop loss'
-  if (normalizedReason.includes('take profit')) return 'Take profit'
-  if (normalizedReason.includes('trailing stop')) return 'Trailing stop'
-  if (normalizedReason.includes('max hold')) return 'Max hold'
-  if (normalizedReason.includes('market inactive')) return 'Market inactive'
-  if (normalizedReason.includes('external_wallet_flatten') || normalizedReason.includes('external wallet')) return 'External flatten'
-  if (normalizedReason.includes('resolution')) return 'Resolution'
-  return 'Closed'
+  if (normalizedReason.includes('stop loss')) return i18n.t('tradingPanel.closeReason.stopLoss')
+  if (normalizedReason.includes('take profit')) return i18n.t('tradingPanel.closeReason.takeProfit')
+  if (normalizedReason.includes('trailing stop')) return i18n.t('tradingPanel.closeReason.trailingStop')
+  if (normalizedReason.includes('max hold')) return i18n.t('tradingPanel.closeReason.maxHold')
+  if (normalizedReason.includes('market inactive')) return i18n.t('tradingPanel.closeReason.marketInactive')
+  if (normalizedReason.includes('external_wallet_flatten') || normalizedReason.includes('external wallet')) return i18n.t('tradingPanel.closeReason.externalFlatten')
+  if (normalizedReason.includes('resolution')) return i18n.t('tradingPanel.closeReason.resolution')
+  return i18n.t('tradingPanel.closeReason.closed')
 }
 
 function isAllowanceErrorText(raw: string): boolean {
@@ -2397,15 +2398,15 @@ function orderFailureHeadline(order: TraderOrder): string {
 
   if (status === 'cancelled') {
     if (normalizedReason.includes('cleanup:max_open_order_timeout')) {
-      return 'Unfilled timeout cancel'
+      return i18n.t('tradingPanel.failReason.unfilledTimeoutCancel')
     }
     if (normalizedReason.includes('session:expired') || normalizedReason.includes('session timed out')) {
-      return 'Session expired'
+      return i18n.t('tradingPanel.failReason.sessionExpired')
     }
     if (normalizedReason.includes('cleanup:')) {
-      return 'Cleanup cancel'
+      return i18n.t('tradingPanel.failReason.cleanupCancel')
     }
-    return 'Canceled'
+    return i18n.t('tradingPanel.failReason.canceled')
   }
 
   if (
@@ -2417,34 +2418,34 @@ function orderFailureHeadline(order: TraderOrder): string {
       && resolvedPrice <= 0
     )
   ) {
-    return 'No live quote'
+    return i18n.t('tradingPanel.failReason.noLiveQuote')
   }
   if (normalizedReason.includes('maximum open positions')) {
-    return 'Position cap hit'
+    return i18n.t('tradingPanel.failReason.positionCapHit')
   }
   if (isGasErrorText(normalizedReason)) {
-    return 'Insufficient gas'
+    return i18n.t('tradingPanel.failReason.insufficientGas')
   }
   if (isAllowanceErrorText(normalizedReason) || normalizedReason.includes('not enough balance')) {
-    return 'Balance/allowance'
+    return i18n.t('tradingPanel.failReason.balanceAllowance')
   }
   if (normalizedReason.includes('invalid signature')) {
-    return 'Signature invalid'
+    return i18n.t('tradingPanel.failReason.signatureInvalid')
   }
   if (
     normalizedReason.includes('below minimum')
     || normalizedReason.includes('min order')
     || normalizedReason.includes('exit_notional_below_min')
   ) {
-    return 'Below minimum size'
+    return i18n.t('tradingPanel.failReason.belowMinimumSize')
   }
   if (normalizedReason.includes('global pause')) {
-    return 'Global pause'
+    return i18n.t('tradingPanel.failReason.globalPause')
   }
   if (normalizedReason.includes('kill switch')) {
-    return 'Kill switch active'
+    return i18n.t('tradingPanel.failReason.killSwitchActive')
   }
-  return 'Execution rejected'
+  return i18n.t('tradingPanel.failReason.executionRejected')
 }
 
 function orderOutcomeSummary(order: TraderOrder): { headline: string; detail: string } {
@@ -2464,7 +2465,7 @@ function orderOutcomeSummary(order: TraderOrder): { headline: string; detail: st
   }
   if (OPEN_ORDER_STATUSES.has(status)) {
     return {
-      headline: 'Working',
+      headline: i18n.t('tradingPanel.lifecycle.working'),
       detail: reason,
     }
   }
@@ -2492,12 +2493,12 @@ function buildTradeLifecycleStages(args: {
 }): TradeLifecycleStage[] {
   const status = normalizeStatus(args.status)
   const reason = String(args.reasonDetail || '').toLowerCase()
-  const closeTriggerLabel = args.closeTrigger ? `Exit (${compactText(args.closeTrigger, 20)})` : 'Exit'
+  const closeTriggerLabel = args.closeTrigger ? `${i18n.t('tradingPanel.lifecycle.exit')} (${compactText(args.closeTrigger, 20)})` : i18n.t('tradingPanel.lifecycle.exit')
   const finalLabel = compactText(args.outcomeHeadline || resolveOrderLifecycleLabel(status), 28)
   const stages: TradeLifecycleStage[] = [
-    { key: 'signal', label: 'Signal', tone: 'neutral', state: 'done' },
-    { key: 'submitted', label: 'Submitted', tone: 'info', state: 'future' },
-    { key: 'working', label: 'Working', tone: 'info', state: 'future' },
+    { key: 'signal', label: i18n.t('tradingPanel.lifecycle.signal'), tone: 'neutral', state: 'done' },
+    { key: 'submitted', label: i18n.t('tradingPanel.lifecycle.submitted'), tone: 'info', state: 'future' },
+    { key: 'working', label: i18n.t('tradingPanel.lifecycle.working'), tone: 'info', state: 'future' },
     { key: 'exit', label: closeTriggerLabel, tone: 'warning', state: 'future' },
     { key: 'outcome', label: finalLabel, tone: 'neutral', state: 'future' },
   ]
@@ -2514,14 +2515,14 @@ function buildTradeLifecycleStages(args: {
   if (status === 'executed') {
     stages[1].state = 'done'
     stages[2].state = 'current'
-    stages[2].label = 'Filled'
+    stages[2].label = i18n.t('tradingPanel.lifecycle.filled')
     stages[2].tone = 'success'
     return stages
   }
   if (RESOLVED_ORDER_STATUSES.has(status)) {
     stages[1].state = 'done'
     stages[2].state = 'done'
-    stages[2].label = 'Filled'
+    stages[2].label = i18n.t('tradingPanel.lifecycle.filled')
     stages[2].tone = 'success'
     stages[3].state = 'done'
     stages[4].state = 'current'
@@ -2541,13 +2542,13 @@ function buildTradeLifecycleStages(args: {
     stages[4].state = 'current'
     stages[4].tone = reason.includes('session:expired') ? 'warning' : 'neutral'
     if (reason.includes('cleanup:max_open_order_timeout')) {
-      stages[4].label = 'Timeout cancel'
+      stages[4].label = i18n.t('tradingPanel.failReason.timeoutCancel')
       stages[4].tone = 'warning'
     } else if (reason.includes('session:expired') || reason.includes('session timed out')) {
-      stages[4].label = 'Session expired'
+      stages[4].label = i18n.t('tradingPanel.failReason.sessionExpired')
       stages[4].tone = 'warning'
     } else {
-      stages[4].label = 'Canceled'
+      stages[4].label = i18n.t('tradingPanel.failReason.canceled')
     }
     return stages
   }
@@ -2796,12 +2797,14 @@ function buildTradeBundleDirectionLabel(bundle: TraderOrderTradeBundle): string 
 
 function buildTradeBundleLabel(bundle: TraderOrderTradeBundle, effectiveGuaranteed = bundle.is_guaranteed): string {
   if (bundle.kind === 'paired_binary') {
-    return effectiveGuaranteed ? 'Guaranteed paired settlement trade' : 'Paired binary trade'
+    return effectiveGuaranteed ? i18n.t('tradingPanel.bundle.pairedGuaranteed') : i18n.t('tradingPanel.bundle.paired')
   }
   if (bundle.kind === 'multi_outcome_yes') {
-    return effectiveGuaranteed ? 'Guaranteed mutually exclusive YES bundle' : 'Mutually exclusive YES bundle'
+    return effectiveGuaranteed ? i18n.t('tradingPanel.bundle.multiYesGuaranteed') : i18n.t('tradingPanel.bundle.multiYes')
   }
-  return effectiveGuaranteed ? `Guaranteed ${bundle.leg_count}-leg bundle` : `${bundle.leg_count}-leg linked trade`
+  return effectiveGuaranteed
+    ? i18n.t('tradingPanel.bundle.nLegGuaranteed', { n: bundle.leg_count })
+    : i18n.t('tradingPanel.bundle.nLegLinked', { n: bundle.leg_count })
 }
 
 function buildTradeBundleLegSummaryLabel(leg: TradeTableBundleLegRow): string {
@@ -2885,10 +2888,10 @@ function bundleHasCompleteFilledCoverage(bundle: TraderOrderTradeBundle, legs: T
 }
 
 function buildTradeBundleGuaranteeBadgeLabel(bundle: TraderOrderTradeBundle, effectiveGuaranteed: boolean): string {
-  if (effectiveGuaranteed) return 'Guaranteed'
-  if (bundle.is_guaranteed) return 'Incomplete'
-  if (bundle.signal_is_guaranteed) return 'Unproven'
-  return 'Linked'
+  if (effectiveGuaranteed) return i18n.t('tradingPanel.badge.guaranteed')
+  if (bundle.is_guaranteed) return i18n.t('tradingPanel.badge.incomplete')
+  if (bundle.signal_is_guaranteed) return i18n.t('tradingPanel.badge.unproven')
+  return i18n.t('tradingPanel.badge.linked')
 }
 
 function buildTradeDisplayRows(orderRows: TradeTableOrderRow[]): TradeTableDisplayRow[] {
@@ -3092,28 +3095,29 @@ function buildTradeDisplayRows(orderRows: TradeTableOrderRow[]): TradeTableDispl
     let outcomeDetail = `${bundleLabel}.`
     if (status === 'open' && profitLow !== null && profitHigh !== null) {
       if (effectiveGuaranteed && !guaranteedAnomaly) {
-        outcomeHeadline = profitLow === profitHigh ? 'Locked spread' : 'Locked payout range'
+        outcomeHeadline = profitLow === profitHigh ? i18n.t('tradingPanel.outcome.lockedSpread') : i18n.t('tradingPanel.outcome.lockedPayoutRange')
       } else if (group.bundle.is_guaranteed) {
-        outcomeHeadline = 'Bundle incomplete'
+        outcomeHeadline = i18n.t('tradingPanel.outcome.bundleIncomplete')
       } else if (group.bundle.signal_is_guaranteed) {
-        outcomeHeadline = 'Bundle unproven'
+        outcomeHeadline = i18n.t('tradingPanel.outcome.bundleUnproven')
       } else if (guaranteedAnomaly) {
-        outcomeHeadline = 'Guarantee drift'
+        outcomeHeadline = i18n.t('tradingPanel.outcome.guaranteeDrift')
       } else {
-        outcomeHeadline = 'Bundle working'
+        outcomeHeadline = i18n.t('tradingPanel.outcome.bundleWorking')
       }
-      outcomeDetail = (
-        `Resolution P&L ${formatSignedCurrencyRange(profitLow, profitHigh)} `
-        + `on ${formatCurrency(filledNotional, true)} cost basis `
-        + `(${formatCurrency(payoutLow || 0, true)}-${formatCurrency(payoutHigh || 0, true)} payout).`
-      )
+      outcomeDetail = i18n.t('tradingPanel.outcome.openDetail', {
+        pnl: formatSignedCurrencyRange(profitLow, profitHigh),
+        cost: formatCurrency(filledNotional, true),
+        payoutLow: formatCurrency(payoutLow || 0, true),
+        payoutHigh: formatCurrency(payoutHigh || 0, true),
+      })
     } else if (RESOLVED_ORDER_STATUSES.has(status)) {
-      outcomeHeadline = realizedPnl >= 0 ? 'Bundle resolved green' : 'Bundle resolved red'
-      outcomeDetail = `Realized ${formatSignedCurrency(realizedPnl)} across ${group.rows.length} linked legs.`
+      outcomeHeadline = realizedPnl >= 0 ? i18n.t('tradingPanel.outcome.resolvedGreen') : i18n.t('tradingPanel.outcome.resolvedRed')
+      outcomeDetail = i18n.t('tradingPanel.outcome.resolvedDetail', { pnl: formatSignedCurrency(realizedPnl), n: group.rows.length })
     } else if (FAILED_ORDER_STATUSES.has(status)) {
-      outcomeHeadline = 'Bundle failed'
+      outcomeHeadline = i18n.t('tradingPanel.outcome.bundleFailed')
       const reasons = Array.from(new Set(group.rows.map((row) => cleanText(row.outcomeDetail)).filter(Boolean)))
-      outcomeDetail = reasons[0] || 'One or more linked legs failed.'
+      outcomeDetail = reasons[0] || i18n.t('tradingPanel.outcome.legsFailedDetail')
     }
 
     displayRows.push({
@@ -3355,7 +3359,7 @@ function worstLatencyGroup(
 }
 
 function formatStrategyVersionLabel(value: number | null): string {
-  return value === null ? 'Latest' : `v${value}`
+  return value === null ? i18n.t('tradingPanel.versionLatest') : `v${value}`
 }
 
 function buildPerformanceSectionKey(
@@ -4960,10 +4964,10 @@ function stableSerializePerformanceValue(value: unknown): string {
 }
 
 function formatPerformanceParamValue(value: unknown): string {
-  if (value === undefined || value === null) return 'Not recorded'
-  if (typeof value === 'boolean') return value ? 'Enabled' : 'Disabled'
+  if (value === undefined || value === null) return i18n.t('tradingPanel.paramNotRecorded')
+  if (typeof value === 'boolean') return value ? i18n.t('tradingPanel.paramEnabled') : i18n.t('tradingPanel.paramDisabled')
   if (typeof value === 'number') {
-    if (!Number.isFinite(value)) return 'Not recorded'
+    if (!Number.isFinite(value)) return i18n.t('tradingPanel.paramNotRecorded')
     if (Math.abs(value) >= 1000) {
       return value.toLocaleString(undefined, { maximumFractionDigits: 2 })
     }
@@ -4995,7 +4999,7 @@ function performanceParamBucketMeta(value: unknown): { key: string; label: strin
   if (value === undefined || value === null) {
     return {
       key: 'not_recorded',
-      label: 'Not recorded',
+      label: i18n.t('tradingPanel.paramNotRecorded'),
       isMissing: true,
     }
   }
@@ -7474,8 +7478,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     ? killSwitchMutation.variables
     : killSwitchOn
   const killSwitchStatusLabel = killSwitchMutation.isPending
-    ? killSwitchSwitchValue ? 'BLOCKING...' : 'OPENING...'
-    : killSwitchOn ? 'BLOCKED' : 'OPEN'
+    ? killSwitchSwitchValue ? t('tradingPanel.killSwitch.blocking') : t('tradingPanel.killSwitch.opening')
+    : killSwitchOn ? t('tradingPanel.killSwitch.blocked') : t('tradingPanel.killSwitch.open')
   const orchestratorEnabled = Boolean(orchestratorControl?.is_enabled) && !Boolean(orchestratorControl?.is_paused)
   const orchestratorBoundSelectedAccountId = typeof orchestratorControl?.settings?.selected_account_id === 'string'
     ? orchestratorControl.settings.selected_account_id.trim()
@@ -12104,7 +12108,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                                       }}
                                       formatter={(value: unknown, name: unknown) => {
                                         const num = Number(value)
-                                        const label = name === 'cumulativePnl' ? 'Cumulative' : name === 'pnl' ? 'Trade P&L' : String(name)
+                                        const label = name === 'cumulativePnl' ? t('tradingPanel.chart.cumulative') : name === 'pnl' ? t('tradingPanel.chart.tradePnl') : String(name)
                                         return [Number.isFinite(num) ? formatSignedCurrency(num) : String(value), label] as [string, string]
                                       }}
                                     />
@@ -13125,7 +13129,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       />
                     </div>
                     <div>
-                      <Label>Max Daily Spend Cap (USD)</Label>
+                      <Label>{t('tradingPanel.globalSettings.maxDailySpendCap')}</Label>
                       <Input
                         type="number"
                         min={1}
@@ -13133,11 +13137,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         value={globalSettingsDraft.maxDailySpendUsdCap}
                         onChange={(event) => setGlobalSettingsField('maxDailySpendUsdCap', event.target.value)}
                         className="mt-1"
-                        placeholder="Unset → per-trader value applies"
+                        placeholder={t('tradingPanel.globalSettings.unsetPerTrader')}
                       />
                     </div>
                     <div>
-                      <Label>Max Spread Cap (bps)</Label>
+                      <Label>{t('tradingPanel.globalSettings.maxSpreadCap')}</Label>
                       <Input
                         type="number"
                         min={0}
@@ -13145,11 +13149,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         value={globalSettingsDraft.maxSpreadBpsCap}
                         onChange={(event) => setGlobalSettingsField('maxSpreadBpsCap', event.target.value)}
                         className="mt-1"
-                        placeholder="Unset → per-trader value applies"
+                        placeholder={t('tradingPanel.globalSettings.unsetPerTrader')}
                       />
                     </div>
                     <div>
-                      <Label>Slippage Cap (bps)</Label>
+                      <Label>{t('tradingPanel.globalSettings.slippageCap')}</Label>
                       <Input
                         type="number"
                         min={0}
@@ -13157,11 +13161,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         value={globalSettingsDraft.slippageBpsCap}
                         onChange={(event) => setGlobalSettingsField('slippageBpsCap', event.target.value)}
                         className="mt-1"
-                        placeholder="Unset → per-trader value applies"
+                        placeholder={t('tradingPanel.globalSettings.unsetPerTrader')}
                       />
                     </div>
                     <div>
-                      <Label>Retry Limit Cap</Label>
+                      <Label>{t('tradingPanel.globalSettings.retryLimitCap')}</Label>
                       <Input
                         type="number"
                         min={0}
@@ -13169,11 +13173,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         value={globalSettingsDraft.retryLimitCap}
                         onChange={(event) => setGlobalSettingsField('retryLimitCap', event.target.value)}
                         className="mt-1"
-                        placeholder="Unset → per-trader value applies"
+                        placeholder={t('tradingPanel.globalSettings.unsetPerTrader')}
                       />
                     </div>
                     <div>
-                      <Label>Retry Backoff Cap (ms)</Label>
+                      <Label>{t('tradingPanel.globalSettings.retryBackoffCap')}</Label>
                       <Input
                         type="number"
                         min={0}
@@ -13181,11 +13185,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         value={globalSettingsDraft.retryBackoffMsCap}
                         onChange={(event) => setGlobalSettingsField('retryBackoffMsCap', event.target.value)}
                         className="mt-1"
-                        placeholder="Unset → per-trader value applies"
+                        placeholder={t('tradingPanel.globalSettings.unsetPerTrader')}
                       />
                     </div>
                     <div>
-                      <Label>Order TTL Cap (seconds)</Label>
+                      <Label>{t('tradingPanel.globalSettings.orderTtlCap')}</Label>
                       <Input
                         type="number"
                         min={1}
@@ -13193,7 +13197,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                         value={globalSettingsDraft.orderTtlSecondsCap}
                         onChange={(event) => setGlobalSettingsField('orderTtlSecondsCap', event.target.value)}
                         className="mt-1"
-                        placeholder="Unset → per-trader value applies"
+                        placeholder={t('tradingPanel.globalSettings.unsetPerTrader')}
                       />
                     </div>
                   </div>

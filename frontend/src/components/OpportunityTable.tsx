@@ -236,7 +236,7 @@ const TableRow = memo(function TableRow({
         <div className="px-2 py-1.5 min-w-0">
           <p className="text-xs font-medium text-foreground truncate leading-tight">{opportunity.title}</p>
           {opportunity.category && (
-            <span className="text-[9px] text-muted-foreground/60">{opportunity.category}</span>
+            <span className="text-[9px] text-muted-foreground/60">{t('discoveryPanel.category.' + opportunity.category.toLowerCase(), { defaultValue: opportunity.category })}</span>
           )}
         </div>
 

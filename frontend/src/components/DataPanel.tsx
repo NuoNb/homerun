@@ -151,7 +151,7 @@ export default function DataPanel({ isConnected, view, onViewChange, onOpenCopil
       {view === 'map' && (
         <div className="flex-1 min-h-0 overflow-hidden px-6 pt-4 pb-5">
           <div className="h-full min-h-0 rounded-lg border border-border/60 bg-card/20 relative overflow-hidden">
-            <ErrorBoundary fallback={<div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">Map view crashed.</div>}>
+            <ErrorBoundary fallback={<div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">{t('dataPanel.mapCrashed')}</div>}>
               <Suspense fallback={<div className="h-full w-full" />}>
                 <WorldMap isConnected={isConnected} />
               </Suspense>
@@ -174,7 +174,7 @@ export default function DataPanel({ isConnected, view, onViewChange, onOpenCopil
 
       {view === 'sources' && (
         <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-          <ErrorBoundary fallback={<div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">Sources view crashed.</div>}>
+          <ErrorBoundary fallback={<div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">{t('dataPanel.sourcesCrashed')}</div>}>
             <DataSourcesManager onOpenCopilot={onOpenCopilot} />
           </ErrorBoundary>
         </div>
@@ -182,7 +182,7 @@ export default function DataPanel({ isConnected, view, onViewChange, onOpenCopil
 
       {view === 'datasets' && (
         <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-          <ErrorBoundary fallback={<div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">Datasets view crashed.</div>}>
+          <ErrorBoundary fallback={<div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-500">{t('dataPanel.datasetsCrashed')}</div>}>
             <Suspense fallback={<div className="h-full w-full" />}>
               <DataLab />
             </Suspense>

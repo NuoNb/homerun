@@ -816,7 +816,7 @@ function OpportunityCard({
                 </Badge>
                 {opportunity.category && (
                   <Badge variant="outline" className="h-5 px-1.5 text-[10px] border-border/80 bg-muted/60 text-muted-foreground">
-                    {opportunity.category}
+                    {t('discoveryPanel.category.' + opportunity.category.toLowerCase(), { defaultValue: opportunity.category })}
                   </Badge>
                 )}
               </div>
@@ -879,7 +879,7 @@ function OpportunityCard({
             )}
             {opportunity.category && !isWeatherOpportunity && (
               <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-muted-foreground border-border/60">
-                {opportunity.category}
+                {t('discoveryPanel.category.' + opportunity.category.toLowerCase(), { defaultValue: opportunity.category })}
               </Badge>
             )}
             {judgment && (

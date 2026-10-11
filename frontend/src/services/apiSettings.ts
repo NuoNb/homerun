@@ -39,6 +39,8 @@ export interface LLMSettings {
   openrouter_base_url: string | null
   nvidia_api_key: string | null
   nvidia_base_url: string | null
+  zhipu_api_key: string | null
+  zhipu_base_url: string | null
   model: string | null
   max_monthly_spend: number | null
   model_assignments: Record<string, string>

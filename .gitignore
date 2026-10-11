@@ -84,3 +84,5 @@ backend/scripts/_*_results*.json
 secrets.json
 .claude/worktrees/
 .cutover-snapshots/
+
+.mimosa

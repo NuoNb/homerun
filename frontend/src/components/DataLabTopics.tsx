@@ -21,6 +21,7 @@
  */
 import { useMemo, useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useTranslation } from 'react-i18next'
 import { formatDistanceToNow } from 'date-fns'
 import {
   Loader2,
@@ -45,13 +46,28 @@ import {
   type TopicSpec,
   type StorageKind,
   topicStorageBadgeColor,
-  formatTopicVolume,
 } from '../services/apiTopicCatalog'
 import { cn } from '../lib/utils'
+
+function formatTopicVolume(spec: TopicSpec, t: (key: string, opts?: Record<string, unknown>) => string): string {
+  if (spec.event_count <= 0 && spec.bytes_on_disk <= 0) return '—'
+  const count = spec.event_count >= 1_000_000
+    ? `${(spec.event_count / 1_000_000).toFixed(1)}M`
+    : spec.event_count >= 1_000
+    ? `${(spec.event_count / 1_000).toFixed(1)}K`
+    : `${spec.event_count}`
+  const events = t('dataLabTopics.volumeEvents', { n: count })
+  const sizeMB = spec.bytes_on_disk / (1024 * 1024)
+  if (sizeMB <= 0) return events
+  if (sizeMB >= 1024) return `${events} · ${(sizeMB / 1024).toFixed(2)} GB`
+  if (sizeMB >= 1) return `${events} · ${sizeMB.toFixed(1)} MB`
+  return `${events} · ${(sizeMB * 1024).toFixed(0)} KB`
+}
 
 type StorageFilter = 'all' | StorageKind
 
 export default function DataLabTopics() {
+  const { t } = useTranslation()
   const [storageFilter, setStorageFilter] = useState<StorageFilter>('all')
   const [enabledOnly, setEnabledOnly] = useState(false)
   const [replayableOnly, setReplayableOnly] = useState(false)
@@ -85,9 +101,9 @@ export default function DataLabTopics() {
       {/* Header / filters */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold tracking-tight">Topic catalog</h3>
+          <h3 className="text-sm font-semibold tracking-tight">{t('dataLabTopics.title')}</h3>
           <p className="text-[11px] text-muted-foreground">
-            Single source of truth for every recorded data topic — what publishes, what subscribes, where it&apos;s stored.
+            {t('dataLabTopics.subtitle')}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -104,7 +120,7 @@ export default function DataLabTopics() {
                     : 'text-muted-foreground hover:text-foreground',
                 )}
               >
-                {k}
+                {k === 'all' ? t('dataLabTopics.filterAll') : k}
               </button>
             ))}
           </div>
@@ -115,7 +131,7 @@ export default function DataLabTopics() {
               onChange={(e) => setEnabledOnly(e.target.checked)}
               className="h-3 w-3"
             />
-            enabled only
+            {t('dataLabTopics.enabledOnly')}
           </label>
           <label className="flex items-center gap-1 text-[11px]">
             <input
@@ -124,7 +140,7 @@ export default function DataLabTopics() {
               onChange={(e) => setReplayableOnly(e.target.checked)}
               className="h-3 w-3"
             />
-            replayable only
+            {t('dataLabTopics.replayableOnly')}
           </label>
           <Button
             size="sm"
@@ -134,21 +150,21 @@ export default function DataLabTopics() {
             disabled={query.isFetching}
           >
             <RefreshCw className={cn('h-3 w-3', query.isFetching && 'animate-spin')} />
-            refresh
+            {t('dataLabTopics.refresh')}
           </Button>
         </div>
       </div>
 
       {/* Summary strip */}
       <div className="flex flex-wrap gap-3 rounded-md border border-border/30 bg-card/30 px-3 py-2 text-[11px]">
-        <span><b>{stats.total}</b> topics</span>
+        <span><b>{stats.total}</b> {t('dataLabTopics.topicsWord')}</span>
         <span className="text-muted-foreground">·</span>
         <span>parquet: <b>{(stats.byKind['parquet'] ?? 0) + (stats.byKind['external_parquet'] ?? 0)}</b></span>
         <span>sql_table: <b>{stats.byKind['sql_table'] ?? 0}</b></span>
         <span>memory: <b>{stats.byKind['memory'] ?? 0}</b></span>
         <span className="text-muted-foreground">·</span>
-        <span><b>{stats.totalEvents.toLocaleString()}</b> events recorded</span>
-        <span><b>{(stats.totalBytes / (1024 * 1024)).toFixed(1)}</b> MB on disk</span>
+        <span><b>{stats.totalEvents.toLocaleString()}</b> {t('dataLabTopics.eventsRecorded')}</span>
+        <span><b>{(stats.totalBytes / (1024 * 1024)).toFixed(1)}</b> {t('dataLabTopics.mbOnDisk')}</span>
       </div>
 
       {/* Global rotation controls */}
@@ -162,69 +178,69 @@ export default function DataLabTopics() {
             <table className="w-full text-[11px]">
               <thead className="sticky top-0 bg-card/95 backdrop-blur border-b border-border/30 text-left">
                 <tr>
-                  <th className="py-2 px-3 font-medium">topic</th>
-                  <th className="py-2 px-2 font-medium">storage</th>
-                  <th className="py-2 px-2 font-medium">publishers / subscribers</th>
-                  <th className="py-2 px-2 font-medium text-right">volume</th>
-                  <th className="py-2 px-2 font-medium">last activity</th>
+                  <th className="py-2 px-3 font-medium">{t('dataLabTopics.colTopic')}</th>
+                  <th className="py-2 px-2 font-medium">{t('dataLabTopics.colStorage')}</th>
+                  <th className="py-2 px-2 font-medium">{t('dataLabTopics.colPubSub')}</th>
+                  <th className="py-2 px-2 font-medium text-right">{t('dataLabTopics.colVolume')}</th>
+                  <th className="py-2 px-2 font-medium">{t('dataLabTopics.colLastActivity')}</th>
                 </tr>
               </thead>
               <tbody>
                 {query.isLoading ? (
                   <tr>
                     <td colSpan={5} className="py-12 text-center text-muted-foreground">
-                      <Loader2 className="inline h-4 w-4 animate-spin" /> loading…
+                      <Loader2 className="inline h-4 w-4 animate-spin" /> {t('dataLabTopics.loading')}
                     </td>
                   </tr>
                 ) : topics.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="py-12 text-center text-muted-foreground">
-                      no topics match these filters
+                      {t('dataLabTopics.noTopics')}
                     </td>
                   </tr>
                 ) : (
-                  topics.map((t: TopicSpec) => (
+                  topics.map((topic: TopicSpec) => (
                     <tr
-                      key={t.slug}
-                      onClick={() => setSelected(t)}
+                      key={topic.slug}
+                      onClick={() => setSelected(topic)}
                       className={cn(
                         'border-b border-border/10 hover:bg-card/60 cursor-pointer',
-                        selected?.slug === t.slug && 'bg-violet-500/5',
+                        selected?.slug === topic.slug && 'bg-violet-500/5',
                       )}
                     >
                       <td className="py-2 px-3 align-top">
-                        <div className="font-mono text-[11px]">{t.slug}</div>
-                        <div className="text-[10px] text-muted-foreground line-clamp-1">{t.title}</div>
+                        <div className="font-mono text-[11px]">{topic.slug}</div>
+                        <div className="text-[10px] text-muted-foreground line-clamp-1">{topic.title}</div>
                       </td>
                       <td className="py-2 px-2 align-top">
                         <Badge
-                          style={{ backgroundColor: topicStorageBadgeColor(t.storage_kind) + '22', color: topicStorageBadgeColor(t.storage_kind) }}
+                          style={{ backgroundColor: topicStorageBadgeColor(topic.storage_kind) + '22', color: topicStorageBadgeColor(topic.storage_kind) }}
                           className="text-[10px] font-mono"
                         >
-                          {t.storage_kind}
+                          {topic.storage_kind}
                         </Badge>
-                        {!t.enabled && (
-                          <Badge variant="outline" className="ml-1 text-[9px]">disabled</Badge>
+                        {!topic.enabled && (
+                          <Badge variant="outline" className="ml-1 text-[9px]">{t('dataLabTopics.badgeDisabled')}</Badge>
                         )}
-                        {!t.is_replayable && (
-                          <Badge variant="outline" className="ml-1 text-[9px]">live-only</Badge>
+                        {!topic.is_replayable && (
+                          <Badge variant="outline" className="ml-1 text-[9px]">{t('dataLabTopics.badgeLiveOnly')}</Badge>
                         )}
                       </td>
                       <td className="py-2 px-2 align-top text-[10px]">
                         <div className="text-muted-foreground">
-                          → {(t.publishers ?? []).join(', ') || '—'}
+                          → {(topic.publishers ?? []).join(', ') || '—'}
                         </div>
                         <div className="text-muted-foreground">
-                          ← {(t.subscribers ?? []).slice(0, 3).join(', ') || '—'}
-                          {t.subscribers && t.subscribers.length > 3 ? ` (+${t.subscribers.length - 3})` : ''}
+                          ← {(topic.subscribers ?? []).slice(0, 3).join(', ') || '—'}
+                          {topic.subscribers && topic.subscribers.length > 3 ? ` (+${topic.subscribers.length - 3})` : ''}
                         </div>
                       </td>
                       <td className="py-2 px-2 align-top text-right font-mono text-[10px]">
-                        {formatTopicVolume(t)}
+                        {formatTopicVolume(topic, t)}
                       </td>
                       <td className="py-2 px-2 align-top text-[10px] text-muted-foreground">
-                        {t.last_published_at ? `pub ${formatDistanceToNow(new Date(t.last_published_at))} ago` : '—'}
-                        {t.last_replayed_at ? <div>rep {formatDistanceToNow(new Date(t.last_replayed_at))} ago</div> : null}
+                        {topic.last_published_at ? `${t('dataLabTopics.pubLabel')} ${formatDistanceToNow(new Date(topic.last_published_at))} ${t('dataLabTopics.agoLabel')}` : '—'}
+                        {topic.last_replayed_at ? <div>{t('dataLabTopics.repLabel')} {formatDistanceToNow(new Date(topic.last_replayed_at))} {t('dataLabTopics.agoLabel')}</div> : null}
                       </td>
                     </tr>
                   ))
@@ -242,6 +258,7 @@ export default function DataLabTopics() {
 }
 
 function BusRotationControls() {
+  const { t } = useTranslation()
   const qc = useQueryClient()
   const settings = useQuery({
     queryKey: ['bus-rotation-settings'],
@@ -273,7 +290,7 @@ function BusRotationControls() {
   })
 
   if (!settings.data) {
-    return <div className="text-[10px] text-muted-foreground">loading rotation settings…</div>
+    return <div className="text-[10px] text-muted-foreground">{t('dataLabTopics.rotationLoading')}</div>
   }
   const s = settings.data
   const totalMB = s.total_bytes_on_disk / (1024 * 1024)
@@ -283,7 +300,7 @@ function BusRotationControls() {
     <div className="flex flex-wrap items-center gap-3 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px]">
       <div className="flex items-center gap-2">
         <HardDrive className="h-3.5 w-3.5 text-amber-700 dark:text-amber-300" />
-        <span className="font-medium">Rotation policy</span>
+        <span className="font-medium">{t('dataLabTopics.rotationPolicy')}</span>
       </div>
       <span className="text-muted-foreground">·</span>
       <label className="flex items-center gap-1.5">
@@ -294,15 +311,15 @@ function BusRotationControls() {
           onChange={(e) => updateSettings.mutate({ pruner_enabled: e.target.checked })}
           className="h-3 w-3"
         />
-        <span>pruner {s.pruner_enabled ? 'ON' : 'OFF'}</span>
+        <span>{t('dataLabTopics.pruner')} {s.pruner_enabled ? 'ON' : 'OFF'}</span>
       </label>
       <span className="text-muted-foreground">·</span>
       <div className="flex items-center gap-1.5">
-        <span>global cap (MB):</span>
+        <span>{t('dataLabTopics.globalCap')}:</span>
         <Input
           value={globalCapMB}
           onChange={(e) => setGlobalCapMB(e.target.value.replace(/[^0-9]/g, ''))}
-          placeholder="none"
+          placeholder={t('dataLabTopics.capNone')}
           className="h-6 w-24 text-[11px] py-0 px-2"
         />
         <Button
@@ -312,12 +329,12 @@ function BusRotationControls() {
             updateSettings.mutate({ global_max_bytes: mb > 0 ? mb * 1024 * 1024 : 0 })
           }}
         >
-          set
+          {t('dataLabTopics.set')}
         </Button>
       </div>
       <span className="text-muted-foreground">·</span>
       <span className={cn('font-mono', overCap && 'text-red-600 font-semibold')}>
-        used: {totalMB.toFixed(1)} MB
+        {t('dataLabTopics.usedLabel')} {totalMB.toFixed(1)} MB
         {s.global_max_bytes != null && ` / ${(s.global_max_bytes / (1024 * 1024)).toFixed(0)} MB`}
       </span>
       <span className="text-muted-foreground">·</span>
@@ -327,11 +344,11 @@ function BusRotationControls() {
         onClick={() => pruneNow.mutate()}
       >
         {pruneNow.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-        prune now
+        {t('dataLabTopics.pruneNow')}
       </Button>
       {pruneNow.data && (
         <span className="text-[10px] text-muted-foreground">
-          last run freed {(((pruneNow.data.freed_bytes_age || 0) + (pruneNow.data.freed_bytes_per_topic || 0) + (pruneNow.data.freed_bytes_global || 0)) / (1024 * 1024)).toFixed(1)} MB
+          {t('dataLabTopics.lastRunFreed', { mb: ((((pruneNow.data.freed_bytes_age || 0) + (pruneNow.data.freed_bytes_per_topic || 0) + (pruneNow.data.freed_bytes_global || 0)) / (1024 * 1024)).toFixed(1)) })}
         </span>
       )}
     </div>
@@ -339,6 +356,7 @@ function BusRotationControls() {
 }
 
 function TopicDetail({ spec }: { spec: TopicSpec | null }) {
+  const { t } = useTranslation()
   const qc = useQueryClient()
   const [previewing, setPreviewing] = useState(false)
   const [preview, setPreview] = useState<{ topic: string; samples: any[]; n: number } | null>(null)
@@ -360,7 +378,7 @@ function TopicDetail({ spec }: { spec: TopicSpec | null }) {
   if (!spec) {
     return (
       <div className="rounded-md border border-border/30 bg-card/20 p-4 text-[11px] text-muted-foreground">
-        select a topic on the left to inspect.
+        {t('dataLabTopics.pickTopic')}
       </div>
     )
   }
@@ -405,27 +423,27 @@ function TopicDetail({ spec }: { spec: TopicSpec | null }) {
 
       <div className="grid grid-cols-2 gap-3 border-b border-border/30 p-3 text-[11px]">
         <div>
-          <div className="text-[9px] uppercase text-muted-foreground">storage uri</div>
+          <div className="text-[9px] uppercase text-muted-foreground">{t('dataLabTopics.storageUri')}</div>
           <div className="font-mono text-[10px] break-all">{spec.storage_uri || '—'}</div>
         </div>
         <div>
-          <div className="text-[9px] uppercase text-muted-foreground">schema version</div>
+          <div className="text-[9px] uppercase text-muted-foreground">{t('dataLabTopics.schemaVersion')}</div>
           <div className="font-mono">v{spec.schema_version}</div>
         </div>
         <div>
-          <div className="text-[9px] uppercase text-muted-foreground">retention</div>
-          <div className="font-mono">{spec.retention_days != null ? `${spec.retention_days} days` : 'forever'}</div>
+          <div className="text-[9px] uppercase text-muted-foreground">{t('dataLabTopics.retentionLabel')}</div>
+          <div className="font-mono">{spec.retention_days != null ? t('dataLabTopics.retentionDaysValue', { n: spec.retention_days }) : t('dataLabTopics.forever')}</div>
         </div>
         <div>
-          <div className="text-[9px] uppercase text-muted-foreground">cumulative volume</div>
-          <div className="font-mono">{formatTopicVolume(spec)}</div>
+          <div className="text-[9px] uppercase text-muted-foreground">{t('dataLabTopics.cumulativeVolume')}</div>
+          <div className="font-mono">{formatTopicVolume(spec, t)}</div>
         </div>
         <div className="col-span-2">
-          <div className="text-[9px] uppercase text-muted-foreground">publishers</div>
+          <div className="text-[9px] uppercase text-muted-foreground">{t('dataLabTopics.publishersLabel')}</div>
           <div className="text-[10px]">{spec.publishers.join(', ') || '—'}</div>
         </div>
         <div className="col-span-2">
-          <div className="text-[9px] uppercase text-muted-foreground">subscribers</div>
+          <div className="text-[9px] uppercase text-muted-foreground">{t('dataLabTopics.subscribersLabel')}</div>
           <div className="text-[10px]">{spec.subscribers.join(', ') || '—'}</div>
         </div>
       </div>
@@ -436,7 +454,7 @@ function TopicDetail({ spec }: { spec: TopicSpec | null }) {
       {(spec.storage_kind === 'parquet' || spec.storage_kind === 'external_parquet') && (
         <div className="border-b border-border/30 p-3 space-y-2 text-[11px]">
           <div className="flex items-center justify-between">
-            <span className="text-[9px] uppercase text-muted-foreground">topic controls</span>
+            <span className="text-[9px] uppercase text-muted-foreground">{t('dataLabTopics.topicControls')}</span>
             <label className="flex items-center gap-1.5">
               <input
                 type="checkbox"
@@ -444,32 +462,32 @@ function TopicDetail({ spec }: { spec: TopicSpec | null }) {
                 onChange={(e) => patch.mutate({ enabled: e.target.checked })}
                 className="h-3 w-3"
               />
-              <span>{spec.enabled ? 'recording ON' : 'recording OFF'}</span>
+              <span>{spec.enabled ? t('dataLabTopics.recordingOn') : t('dataLabTopics.recordingOff')}</span>
             </label>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <div className="text-[9px] uppercase text-muted-foreground mb-1">retention (days)</div>
+              <div className="text-[9px] uppercase text-muted-foreground mb-1">{t('dataLabTopics.retentionDaysLabel')}</div>
               <div className="flex gap-1">
                 <Input
                   value={retentionDays}
                   onChange={(e) => setRetentionDays(e.target.value.replace(/[^0-9]/g, ''))}
-                  placeholder="forever"
+                  placeholder={t('dataLabTopics.forever')}
                   className="h-6 text-[11px] py-0 px-2"
                 />
                 <Button
                   size="sm" variant="outline" className="h-6 text-[10px] px-2"
                   onClick={() => patch.mutate({ retention_days: parseInt(retentionDays || '0', 10) })}
-                >set</Button>
+                >{t('dataLabTopics.set')}</Button>
               </div>
             </div>
             <div>
-              <div className="text-[9px] uppercase text-muted-foreground mb-1">max size (MB)</div>
+              <div className="text-[9px] uppercase text-muted-foreground mb-1">{t('dataLabTopics.maxSizeLabel')}</div>
               <div className="flex gap-1">
                 <Input
                   value={maxBytesMB}
                   onChange={(e) => setMaxBytesMB(e.target.value.replace(/[^0-9]/g, ''))}
-                  placeholder="unlimited"
+                  placeholder={t('dataLabTopics.unlimited')}
                   className="h-6 text-[11px] py-0 px-2"
                 />
                 <Button
@@ -478,12 +496,12 @@ function TopicDetail({ spec }: { spec: TopicSpec | null }) {
                     const mb = parseInt(maxBytesMB || '0', 10)
                     patch.mutate({ max_bytes: mb > 0 ? mb * 1024 * 1024 : 0 })
                   }}
-                >set</Button>
+                >{t('dataLabTopics.set')}</Button>
               </div>
             </div>
           </div>
           {patch.isError && (
-            <div className="text-[10px] text-red-600">patch failed: {String((patch.error as any)?.message || patch.error)}</div>
+            <div className="text-[10px] text-red-600">{t('dataLabTopics.patchFailed')} {String((patch.error as any)?.message || patch.error)}</div>
           )}
         </div>
       )}
@@ -497,15 +515,15 @@ function TopicDetail({ spec }: { spec: TopicSpec | null }) {
           onClick={onPreview}
         >
           {previewing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-          replay last 24h preview (25 envelopes)
+          {t('dataLabTopics.replayPreview')}
         </Button>
         {preview && (
           <div className="mt-3 max-h-[280px] overflow-auto rounded border border-border/30 bg-card/30 p-2">
             <div className="text-[10px] text-muted-foreground mb-1">
-              {preview.n} events seen · showing first {preview.samples.length}
+              {t('dataLabTopics.eventsSeen', { n: preview.n, m: preview.samples.length })}
             </div>
             {preview.samples.length === 0 ? (
-              <div className="text-[10px] text-muted-foreground">no envelopes in window</div>
+              <div className="text-[10px] text-muted-foreground">{t('dataLabTopics.noEnvelopes')}</div>
             ) : (
               preview.samples.map((s, i) => (
                 <div key={i} className="border-b border-border/10 py-1.5 text-[10px]">

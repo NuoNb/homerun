@@ -105,7 +105,7 @@ function RecordRow({ record, index }: { record: PreviewRecord; index: number }) 
           <span>{new Date(record.observed_at).toLocaleString()}</span>
         )}
       </div>
-      <PayloadViewer data={record.payload} label="payload" />
+      <PayloadViewer data={record.payload} label={t('dataSourcePreviewFlyout.payloadLabel')} />
     </div>
   )
 }

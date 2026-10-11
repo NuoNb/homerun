@@ -158,20 +158,6 @@ export async function replayPreview(req: ReplayPreviewRequest): Promise<ReplayPr
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
-export function formatTopicVolume(t: TopicSpec): string {
-  if (t.event_count <= 0 && t.bytes_on_disk <= 0) return '—'
-  const events = t.event_count >= 1_000_000
-    ? `${(t.event_count / 1_000_000).toFixed(1)}M events`
-    : t.event_count >= 1_000
-    ? `${(t.event_count / 1_000).toFixed(1)}K events`
-    : `${t.event_count} events`
-  const sizeMB = t.bytes_on_disk / (1024 * 1024)
-  if (sizeMB <= 0) return events
-  if (sizeMB >= 1024) return `${events} · ${(sizeMB / 1024).toFixed(2)} GB`
-  if (sizeMB >= 1) return `${events} · ${sizeMB.toFixed(1)} MB`
-  return `${events} · ${(sizeMB * 1024).toFixed(0)} KB`
-}
-
 export function topicStorageBadgeColor(kind: StorageKind): string {
   switch (kind) {
     case 'parquet':   return '#16a34a'  // green — operator-managed canonical store

@@ -10,6 +10,7 @@ import {
   DollarSign,
   LayoutDashboard,
   ListChecks,
+  Plus,
   Receipt,
   RefreshCw,
   Shield,
@@ -25,6 +26,7 @@ import { Card, CardContent } from './ui/card'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { ScrollArea } from './ui/scroll-area'
+import CreateSandboxAccountDialog from './CreateSandboxAccountDialog'
 import {
   getAccountPositions,
   getAccountTrades,
@@ -134,6 +136,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   const [accountMode, setAccountMode] = useAtom(accountModeAtom)
   const [selectedAccountId, setSelectedAccountId] = useAtom(selectedAccountIdAtom)
   const [workspaceTab, setWorkspaceTab] = useState<AccountsWorkspaceTab>(accountMode === 'live' ? 'live' : 'overview')
+  const [createAccountOpen, setCreateAccountOpen] = useState(false)
   const [sandboxView, setSandboxView] = useState<DeskView>('overview')
   const [liveView, setLiveView] = useState<DeskView>('overview')
 
@@ -619,6 +622,15 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
       .sort((left, right) => right.count - left.count)
   }, [sandboxTradeRows])
 
+  const openCreateAccountDialog = () => {
+    setCreateAccountOpen(true)
+  }
+
+  const handleAccountCreated = (accountId: string) => {
+    setSelectedAccountId(accountId)
+    setAccountMode('sandbox')
+  }
+
   const openSandboxDesk = (accountId?: string) => {
     if (accountId) {
       setSelectedAccountId(accountId)
@@ -779,20 +791,40 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                     <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/70">{t('accounts.sandboxFleet')}</p>
                     <p className="text-xs text-muted-foreground">{t('accounts.sandboxFleetDesc')}</p>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => openSandboxDesk()}
-                    className="h-6 text-[11px]"
-                  >
-                    {t('accounts.openSandboxDesk')}
-                  </Button>
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={openCreateAccountDialog}
+                      className="h-6 gap-1 text-[11px]"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      {t('accounts.newSandboxAccount')}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openSandboxDesk()}
+                      className="h-6 text-[11px]"
+                    >
+                      {t('accounts.openSandboxDesk')}
+                    </Button>
+                  </div>
                 </div>
 
                 {sandboxAccounts.length === 0 ? (
                   <div className="px-4 py-8 text-center">
                     <Shield className="mx-auto mb-2 h-6 w-6 text-muted-foreground" />
                     <p className="text-sm text-muted-foreground">{t('accounts.noSandboxAccountsYet')}</p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={openCreateAccountDialog}
+                      className="mt-3 h-7 gap-1 text-[11px]"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      {t('accounts.newSandboxAccount')}
+                    </Button>
                   </div>
                 ) : (
                   <div className="min-h-0 flex-1 overflow-auto">
@@ -990,7 +1022,18 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
         <div className="flex-1 min-h-0 grid gap-2 xl:grid-cols-[250px_minmax(0,1fr)]">
           <div className="hidden xl:flex min-h-0 flex-col rounded-lg border border-border/70 bg-card overflow-hidden">
             <div className="shrink-0 border-b border-border/50 px-2.5 py-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t('accounts.sandboxAccounts')}</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{t('accounts.sandboxAccounts')}</p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={openCreateAccountDialog}
+                  className="h-6 w-6 p-0"
+                  title={t('accounts.newSandboxAccount')}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
               <p className="text-[10px] text-muted-foreground">{t('accounts.desksConfigured', { n: sandboxAccounts.length })}</p>
             </div>
             <ScrollArea className="flex-1 min-h-0">
@@ -1662,6 +1705,12 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
           </div>
         </div>
       )}
+
+      <CreateSandboxAccountDialog
+        open={createAccountOpen}
+        onOpenChange={setCreateAccountOpen}
+        onCreated={handleAccountCreated}
+      />
     </div>
   )
 }

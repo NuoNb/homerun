@@ -773,24 +773,24 @@ export default function SettingsPanel({
   // Non-trading subsystems that can be shed via the is_enabled master switch.
   // Only subsystems whose worker loop actually gates on is_enabled are listed
   // (scanner/orchestrator/reconciliation are trading-critical and excluded).
-  const TOGGLEABLE_SUBSYSTEMS: { name: string; label: string; desc: string; enableHint: string }[] = [
+  const TOGGLEABLE_SUBSYSTEMS: { name: string; labelKey: string; descKey: string; hintKey: string }[] = [
     {
       name: 'discovery',
-      label: 'Wallet discovery',
-      desc: 'Scans Polymarket for new trader wallets to track and copy. Disabling stops new-wallet discovery; already-tracked traders keep trading.',
-      enableHint: 'Off by default. Turn on if you run a copy-trading strategy that follows trader wallets.',
+      labelKey: 'settings.maint.subDiscoveryLabel',
+      descKey: 'settings.maint.subDiscoveryDesc',
+      hintKey: 'settings.maint.subDiscoveryHint',
     },
     {
       name: 'news',
-      label: 'News ingestion',
-      desc: 'Polls news sources and emits news-driven signals. Disabling stops all news polling and any news-based strategies.',
-      enableHint: 'Off by default. Turn on if you run a news-driven strategy.',
+      labelKey: 'settings.maint.subNewsLabel',
+      descKey: 'settings.maint.subNewsDesc',
+      hintKey: 'settings.maint.subNewsHint',
     },
     {
       name: 'weather',
-      label: 'Weather ingestion',
-      desc: 'Polls weather data and emits weather-driven signals. Disabling stops all weather polling and any weather-based strategies.',
-      enableHint: 'Off by default. Turn on if you run a weather-driven strategy.',
+      labelKey: 'settings.maint.subWeatherLabel',
+      descKey: 'settings.maint.subWeatherDesc',
+      hintKey: 'settings.maint.subWeatherHint',
     },
   ]
 
@@ -1164,7 +1164,7 @@ export default function SettingsPanel({
                           <div>
                             <p className="font-medium text-sm">Polymarket</p>
                             <p className="text-xs text-muted-foreground">
-                              Native full-text search via Gamma API
+                              {t('settings.search.polymarketNative')}
                             </p>
                           </div>
                           <Switch
@@ -1179,7 +1179,7 @@ export default function SettingsPanel({
                           <div>
                             <p className="font-medium text-sm">Kalshi</p>
                             <p className="text-xs text-muted-foreground">
-                              Client-side filtering (slower, no native search API)
+                              {t('settings.search.kalshiClientSide')}
                             </p>
                           </div>
                           <Switch
@@ -1190,7 +1190,7 @@ export default function SettingsPanel({
                       </Card>
 
                       <div>
-                        <Label className="text-xs text-muted-foreground">Max Results</Label>
+                        <Label className="text-xs text-muted-foreground">{t('settings.search.maxResults')}</Label>
                         <Input
                           type="number"
                           value={searchForm.search_max_results}
@@ -1205,20 +1205,20 @@ export default function SettingsPanel({
 
                       <div className="space-y-3">
                         <div>
-                          <p className="font-medium text-sm">Web Search Providers</p>
+                          <p className="font-medium text-sm">{t('settings.search.webProvidersTitle')}</p>
                           <p className="text-xs text-muted-foreground">
-                            Used by AI agents for web search. Falls back in order: SerpAPI → Brave → DuckDuckGo (no key needed).
+                            {t('settings.search.webProvidersDesc')}
                           </p>
                         </div>
 
                         <div>
-                          <Label className="text-xs text-muted-foreground">SerpAPI Key</Label>
+                          <Label className="text-xs text-muted-foreground">{t('settings.search.serpapiKeyLabel')}</Label>
                           <div className="relative mt-1">
                             <Input
                               type={showSearchSecrets['serpapi'] ? 'text' : 'password'}
                               value={searchForm.serpapi_key}
                               onChange={(e) => setSearchForm(p => ({ ...p, serpapi_key: e.target.value }))}
-                              placeholder={settings?.search_filters?.serpapi_key || 'Not configured'}
+                              placeholder={settings?.search_filters?.serpapi_key || t('settings.search.notConfigured')}
                               className="pr-10 font-mono text-sm"
                             />
                             <Button
@@ -1231,17 +1231,17 @@ export default function SettingsPanel({
                               {showSearchSecrets['serpapi'] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                             </Button>
                           </div>
-                          <p className="text-[11px] text-muted-foreground/70 mt-1">serpapi.com — Google search results</p>
+                          <p className="text-[11px] text-muted-foreground/70 mt-1">{t('settings.search.serpapiHint')}</p>
                         </div>
 
                         <div>
-                          <Label className="text-xs text-muted-foreground">Brave Search API Key</Label>
+                          <Label className="text-xs text-muted-foreground">{t('settings.search.braveKeyLabel')}</Label>
                           <div className="relative mt-1">
                             <Input
                               type={showSearchSecrets['brave'] ? 'text' : 'password'}
                               value={searchForm.brave_search_key}
                               onChange={(e) => setSearchForm(p => ({ ...p, brave_search_key: e.target.value }))}
-                              placeholder={settings?.search_filters?.brave_search_key || 'Not configured'}
+                              placeholder={settings?.search_filters?.brave_search_key || t('settings.search.notConfigured')}
                               className="pr-10 font-mono text-sm"
                             />
                             <Button
@@ -1254,7 +1254,7 @@ export default function SettingsPanel({
                               {showSearchSecrets['brave'] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                             </Button>
                           </div>
-                          <p className="text-[11px] text-muted-foreground/70 mt-1">api.search.brave.com — Brave web search</p>
+                          <p className="text-[11px] text-muted-foreground/70 mt-1">{t('settings.search.braveHint')}</p>
                         </div>
                       </div>
 
@@ -1263,7 +1263,7 @@ export default function SettingsPanel({
                       <div className="flex items-center gap-2">
                         <Button size="sm" onClick={() => handleSaveSection('search')} disabled={saveMutation.isPending}>
                           <Save className="w-3.5 h-3.5 mr-1.5" />
-                          Save
+                          {t('settings.actions.save')}
                         </Button>
                       </div>
                     </div>
@@ -1348,7 +1348,7 @@ export default function SettingsPanel({
                             type="text"
                             value={scannerForm.market_fetch_order}
                             onChange={(e) => setScannerForm(p => ({ ...p, market_fetch_order: e.target.value }))}
-                            placeholder="volume"
+                            placeholder={t('settings.scanner.volumePlaceholder')}
                             className="mt-1 text-sm"
                           />
                           <p className="text-[11px] text-muted-foreground/70 mt-1">{t('settings.scanner.orderHint')}</p>
@@ -1976,41 +1976,36 @@ export default function SettingsPanel({
                     <div className="space-y-4">
                       <Card className="bg-muted border-sky-500/30">
                         <CardContent className="p-3 space-y-1">
-                          <p className="font-medium text-sm">Polygon RPC for wallet monitor</p>
+                          <p className="font-medium text-sm">{t('settings.rpc.cardTitle')}</p>
                           <p className="text-xs text-muted-foreground">
-                            The wallet monitor polls Polygon every block for OrderFilled events.
-                            On free public endpoints (publicnode, llamarpc, 1rpc) you'll see
-                            <code className="mx-1 px-1 bg-background rounded text-[10px]">RPC failed across all endpoints</code>
-                            errors and copy-trade detection drops sub-blocks under load.
-                            Configure an authenticated provider (Ankr / Alchemy / QuickNode) here
-                            to eliminate the wallet-monitor failure cascade.
+                            {t('settings.rpc.cardDesc1')}{' '}
+                            <code className="mx-1 px-1 bg-background rounded text-[10px]">{t('settings.rpc.cardDescCode')}</code>{' '}
+                            {t('settings.rpc.cardDesc2')}
                           </p>
                           <p className="text-xs text-muted-foreground">
-                            URLs are stored encrypted (Ankr-style URL-path API keys are supported).
-                            Empty input leaves the stored value unchanged. Workers pick up new
-                            URLs on next restart.
+                            {t('settings.rpc.cardDesc3')}
                           </p>
                         </CardContent>
                       </Card>
 
                       <SecretInput
-                        label="Polygon HTTPS RPC URL"
+                        label={t('settings.rpc.httpsLabel')}
                         value={rpcForm.rpc_url}
                         placeholder={settings?.blockchain_rpc?.rpc_url || 'https://rpc.ankr.com/polygon/<your-api-key>'}
                         onChange={(v) => setRpcForm(p => ({ ...p, rpc_url: v }))}
                         showSecret={showSecrets['polygon_rpc_url']}
                         onToggle={() => toggleSecret('polygon_rpc_url')}
-                        description="Used for eth_getLogs polling. Ankr / Alchemy / QuickNode all work."
+                        description={t('settings.rpc.httpsDesc')}
                       />
 
                       <SecretInput
-                        label="Polygon WebSocket RPC URL (optional)"
+                        label={t('settings.rpc.wsLabel')}
                         value={rpcForm.ws_url}
                         placeholder={settings?.blockchain_rpc?.ws_url || 'wss://rpc.ankr.com/polygon/ws/<your-api-key>'}
                         onChange={(v) => setRpcForm(p => ({ ...p, ws_url: v }))}
                         showSecret={showSecrets['polygon_ws_url']}
                         onToggle={() => toggleSecret('polygon_ws_url')}
-                        description="Optional. Used to subscribe to new block headers. Falls back to a public WS endpoint if unset."
+                        description={t('settings.rpc.wsDesc')}
                       />
 
                       <Separator className="opacity-30" />
@@ -2045,9 +2040,9 @@ export default function SettingsPanel({
                       <div className="flex items-start gap-2 p-3 bg-sky-500/5 border border-sky-500/20 rounded-lg">
                         <Wifi className="w-4 h-4 text-sky-400 mt-0.5 shrink-0" />
                         <p className="text-xs text-muted-foreground">
-                          When enabled, the dashboard binds to <span className="font-mono">0.0.0.0</span> instead of <span className="font-mono">localhost</span>,
-                          making it reachable from any device on your LAN (e.g. phone, tablet, another PC).
-                          <span className="text-yellow-400 font-medium"> Requires a restart to take effect.</span>
+                          {t('settings.net.lanDesc1')} <span className="font-mono">0.0.0.0</span> {t('settings.net.lanDesc2')} <span className="font-mono">localhost</span>,
+                          {t('settings.net.lanDesc3')}{' '}
+                          <span className="text-yellow-400 font-medium"> {t('settings.net.lanRestart')}</span>
                         </p>
                       </div>
 
@@ -2067,7 +2062,7 @@ export default function SettingsPanel({
                     <div className="space-y-4">
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
-                          <p className="text-[10px] uppercase tracking-widest text-muted-foreground">Categories</p>
+                          <p className="text-[10px] uppercase tracking-widest text-muted-foreground">{t('settings.transfer.categories')}</p>
                           <div className="flex items-center gap-2">
                             <Button
                               type="button"
@@ -2076,7 +2071,7 @@ export default function SettingsPanel({
                               className="h-7 px-2 text-[11px]"
                               onClick={() => setAllTransferCategories(true)}
                             >
-                              All
+                              {t('settings.transfer.all')}
                             </Button>
                             <Button
                               type="button"
@@ -2085,7 +2080,7 @@ export default function SettingsPanel({
                               className="h-7 px-2 text-[11px]"
                               onClick={() => setAllTransferCategories(false)}
                             >
-                              None
+                              {t('settings.transfer.none')}
                             </Button>
                           </div>
                         </div>
@@ -2111,16 +2106,16 @@ export default function SettingsPanel({
 
                         <Card className="bg-amber-500/5 border-amber-500/25">
                           <CardContent className="p-3">
-                            <p className="text-xs text-amber-300 font-medium">Sensitive export warning</p>
+                            <p className="text-xs text-amber-300 font-medium">{t('settings.transfer.sensitiveWarning')}</p>
                             <p className="text-xs text-muted-foreground mt-1">
-                              Export bundles include plaintext API credentials for selected categories. Store them securely.
+                              {t('settings.transfer.sensitiveWarningBody')}
                             </p>
                           </CardContent>
                         </Card>
 
                         <Card className="bg-muted border-border/50">
                           <CardContent className="p-3 space-y-2">
-                            <p className="text-xs uppercase tracking-widest text-muted-foreground">Import Bundle</p>
+                            <p className="text-xs uppercase tracking-widest text-muted-foreground">{t('settings.transfer.importBundle')}</p>
                             <input
                               ref={transferFileInputRef}
                               type="file"
@@ -2136,10 +2131,10 @@ export default function SettingsPanel({
                                 onClick={() => transferFileInputRef.current?.click()}
                               >
                                 <Upload className="w-3.5 h-3.5 mr-1.5" />
-                                Choose JSON
+                                {t('settings.transfer.chooseJson')}
                               </Button>
                               <span className="text-xs text-muted-foreground">
-                                {importFileName || 'No file selected'}
+                                {importFileName || t('settings.transfer.noFileSelected')}
                               </span>
                             </div>
                           </CardContent>
@@ -2159,7 +2154,7 @@ export default function SettingsPanel({
                           ) : (
                             <Download className="w-3.5 h-3.5 mr-1.5" />
                           )}
-                          Export Bundle
+                          {t('settings.transfer.exportBundle')}
                         </Button>
                         <Button
                           variant="secondary"
@@ -2172,7 +2167,7 @@ export default function SettingsPanel({
                           ) : (
                             <Upload className="w-3.5 h-3.5 mr-1.5" />
                           )}
-                          Import Bundle
+                          {t('settings.transfer.importBundle')}
                         </Button>
                       </div>
                     </div>
@@ -2186,12 +2181,12 @@ export default function SettingsPanel({
                           <div>
                             <p className="font-medium text-sm">Polybacktest</p>
                             <p className="text-xs text-muted-foreground">
-                              Sub-second Polymarket Up/Down book history + Binance reference prices.
-                              Buy a Pro tier at <a href="https://polybacktest.com/dashboard" target="_blank" rel="noreferrer" className="underline">polybacktest.com</a>.
+                              {t('settings.providers.polybacktestDesc')}{' '}
+                              <a href="https://polybacktest.com/dashboard" target="_blank" rel="noreferrer" className="underline">polybacktest.com</a>.
                             </p>
                           </div>
                           <div className="space-y-2">
-                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">API key</Label>
+                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{t('settings.providers.apiKeyLabel')}</Label>
                             <div className="flex items-center gap-1">
                               <Input
                                 type={showProviderKey ? 'text' : 'password'}
@@ -2199,8 +2194,8 @@ export default function SettingsPanel({
                                 onChange={(e) => setProviderForm((p) => ({ ...p, polybacktest_api_key: e.target.value }))}
                                 placeholder={
                                   providerSettingsQuery.data?.polybacktest_api_key_set
-                                    ? '(set — leave to keep)'
-                                    : 'Paste API key'
+                                    ? t('settings.providers.keySetKeep')
+                                    : t('settings.providers.pasteApiKey')
                                 }
                                 className="h-9 font-mono text-xs"
                               />
@@ -2210,17 +2205,17 @@ export default function SettingsPanel({
                                 variant="ghost"
                                 className="h-9 w-9 p-0"
                                 onClick={() => setShowProviderKey((v) => !v)}
-                                title={showProviderKey ? 'Hide' : 'Show'}
+                                title={showProviderKey ? t('settings.providers.hide') : t('settings.providers.show')}
                               >
                                 {showProviderKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                               </Button>
                             </div>
                             <p className="text-[10px] text-muted-foreground">
-                              Empty value clears the key. Mask is shown when a key is stored — leave it untouched to keep.
+                              {t('settings.providers.keyHint')}
                             </p>
                           </div>
                           <div className="space-y-2">
-                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">Base URL (optional)</Label>
+                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{t('settings.providers.baseUrlLabel')}</Label>
                             <Input
                               value={providerForm.polybacktest_base_url}
                               onChange={(e) => setProviderForm((p) => ({ ...p, polybacktest_base_url: e.target.value }))}
@@ -2236,14 +2231,13 @@ export default function SettingsPanel({
                           <div>
                             <p className="font-medium text-sm">Telonex</p>
                             <p className="text-xs text-muted-foreground">
-                              Daily Parquet files for Polymarket (trades, quotes, L2 book snapshots,
-                              on-chain fills) + Binance reference prices. Get a key at{' '}
+                              {t('settings.providers.telonexDesc1')}{' '}
                               <a href="https://telonex.io" target="_blank" rel="noreferrer" className="underline">telonex.io</a>.
-                              Free tier = 5 total downloads.
+                              {t('settings.providers.telonexDesc2')}
                             </p>
                           </div>
                           <div className="space-y-2">
-                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">API key</Label>
+                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{t('settings.providers.apiKeyLabel')}</Label>
                             <div className="flex items-center gap-1">
                               <Input
                                 type={showTelonexKey ? 'text' : 'password'}
@@ -2251,8 +2245,8 @@ export default function SettingsPanel({
                                 onChange={(e) => setProviderForm((p) => ({ ...p, telonex_api_key: e.target.value }))}
                                 placeholder={
                                   providerSettingsQuery.data?.telonex_api_key_set
-                                    ? '(set — leave to keep)'
-                                    : 'Paste API key'
+                                    ? t('settings.providers.keySetKeep')
+                                    : t('settings.providers.pasteApiKey')
                                 }
                                 className="h-9 font-mono text-xs"
                               />
@@ -2262,17 +2256,17 @@ export default function SettingsPanel({
                                 variant="ghost"
                                 className="h-9 w-9 p-0"
                                 onClick={() => setShowTelonexKey((v) => !v)}
-                                title={showTelonexKey ? 'Hide' : 'Show'}
+                                title={showTelonexKey ? t('settings.providers.hide') : t('settings.providers.show')}
                               >
                                 {showTelonexKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                               </Button>
                             </div>
                             <p className="text-[10px] text-muted-foreground">
-                              Empty value clears the key. Mask is shown when a key is stored — leave it untouched to keep.
+                              {t('settings.providers.keyHint')}
                             </p>
                           </div>
                           <div className="space-y-2">
-                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">Base URL (optional)</Label>
+                            <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{t('settings.providers.baseUrlLabel')}</Label>
                             <Input
                               value={providerForm.telonex_base_url}
                               onChange={(e) => setProviderForm((p) => ({ ...p, telonex_base_url: e.target.value }))}
@@ -2286,19 +2280,17 @@ export default function SettingsPanel({
                       <Card className="bg-muted">
                         <CardContent className="p-3 space-y-3">
                           <div>
-                            <p className="font-medium text-sm">Reverse-engineer defaults</p>
+                            <p className="font-medium text-sm">{t('settings.providers.reverseTitle')}</p>
                             <p className="text-xs text-muted-foreground">
-                              Operator-tunable defaults for new strategy reverse-engineer jobs.
-                              Empty fields fall back to the AI default model + service guards (no hidden defaults in code).
+                              {t('settings.providers.reverseDesc')}
                             </p>
                           </div>
                           <p className="text-[10px] text-muted-foreground">
-                            Default LLM model is set in <strong>AI → Models</strong> (under
-                            "Strategy Reverse-Engineer" — same place every other per-purpose model lives).
+                            {t('settings.providers.reverseModelNote1')} <strong>AI → Models</strong> ({t('settings.providers.reverseModelNote2')})
                           </p>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div className="space-y-2">
-                              <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">Max iterations</Label>
+                              <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{t('settings.providers.maxIterations')}</Label>
                               <Input
                                 value={providerForm.reverse_engineer_max_iterations}
                                 onChange={(e) => setProviderForm((p) => ({ ...p, reverse_engineer_max_iterations: e.target.value }))}
@@ -2307,7 +2299,7 @@ export default function SettingsPanel({
                               />
                             </div>
                             <div className="space-y-2">
-                              <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">Target score (0-1)</Label>
+                              <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{t('settings.providers.targetScore')}</Label>
                               <Input
                                 value={providerForm.reverse_engineer_target_score}
                                 onChange={(e) => setProviderForm((p) => ({ ...p, reverse_engineer_target_score: e.target.value }))}
@@ -2316,16 +2308,16 @@ export default function SettingsPanel({
                               />
                             </div>
                             <div className="space-y-2">
-                              <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">Max cost (USD)</Label>
+                              <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{t('settings.providers.maxCost')}</Label>
                               <Input
                                 value={providerForm.reverse_engineer_max_cost_usd}
                                 onChange={(e) => setProviderForm((p) => ({ ...p, reverse_engineer_max_cost_usd: e.target.value }))}
-                                placeholder="(no cap)"
+                                placeholder={t('settings.providers.noCap')}
                                 className="h-9 text-xs"
                               />
                             </div>
                             <div className="space-y-2 md:col-span-2">
-                              <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">Max wallet trades pulled</Label>
+                              <Label className="text-[11px] uppercase tracking-wide text-muted-foreground">{t('settings.providers.maxWalletTrades')}</Label>
                               <Input
                                 value={providerForm.reverse_engineer_max_wallet_trades}
                                 onChange={(e) => setProviderForm((p) => ({ ...p, reverse_engineer_max_wallet_trades: e.target.value }))}
@@ -2350,7 +2342,7 @@ export default function SettingsPanel({
                           ) : (
                             <Save className="h-3.5 w-3.5" />
                           )}
-                          Save provider settings
+                          {t('settings.providers.save')}
                         </Button>
                       </div>
                     </div>
@@ -2362,13 +2354,9 @@ export default function SettingsPanel({
                       <Card className="bg-muted">
                         <CardContent className="p-3 space-y-3">
                           <div>
-                            <p className="font-medium text-sm">Background Subsystems</p>
+                            <p className="font-medium text-sm">{t('settings.maint.subsystemsTitle')}</p>
                             <p className="text-xs text-muted-foreground">
-                              These ship <span className="font-medium">off</span> by default — only the
-                              market scanner and crypto lane run out of the box. Turn one on if you build
-                              a strategy that needs its signals. Disabling idles the subsystem's loop and
-                              persists across restarts and Resume All (unlike Pause, which is transient).
-                              The process stays resident, so this frees CPU, not RAM.
+                              {t('settings.maint.subsystemsDesc1')} <span className="font-medium">{t('settings.maint.subsystemsOff')}</span> {t('settings.maint.subsystemsDesc2')}
                             </p>
                           </div>
                           <div className="space-y-2">
@@ -2382,10 +2370,10 @@ export default function SettingsPanel({
                                   <div className="flex items-start justify-between gap-3">
                                     <div className="space-y-1">
                                       <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                                        {sub.label}
+                                        {t(sub.labelKey)}
                                       </p>
                                       <p className="text-[11px] text-muted-foreground/80 leading-snug">
-                                        {sub.desc}
+                                        {t(sub.descKey)}
                                       </p>
                                     </div>
                                     <div className="flex items-center gap-2 pt-0.5">
@@ -2395,7 +2383,7 @@ export default function SettingsPanel({
                                           enabled ? 'text-emerald-500' : 'text-muted-foreground',
                                         )}
                                       >
-                                        {enabled ? 'On' : 'Off'}
+                                        {enabled ? t('settings.maint.on') : t('settings.maint.off')}
                                       </span>
                                       <Switch
                                         checked={enabled}
@@ -2408,7 +2396,7 @@ export default function SettingsPanel({
                                   </div>
                                   {!enabled && (
                                     <p className="mt-2 text-[11px] leading-snug text-amber-500/90">
-                                      {sub.enableHint}
+                                      {t(sub.hintKey)}
                                     </p>
                                   )}
                                 </div>
@@ -2426,8 +2414,8 @@ export default function SettingsPanel({
                           <CardContent className="p-3 space-y-3">
                             <div className="flex items-center justify-between">
                               <div>
-                                <p className="font-medium text-sm">Database Metrics</p>
-                                <p className="text-xs text-muted-foreground">Current footprint and row volume</p>
+                                <p className="font-medium text-sm">{t('settings.maint.dbMetricsTitle')}</p>
+                                <p className="text-xs text-muted-foreground">{t('settings.maint.dbMetricsSub')}</p>
                               </div>
                               <Button
                                 type="button"
@@ -2447,7 +2435,7 @@ export default function SettingsPanel({
 
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                               <div className="rounded-lg border border-border/50 bg-card/40 px-3 py-2">
-                                <p className="text-[11px] uppercase tracking-widest text-muted-foreground">DB Size</p>
+                                <p className="text-[11px] uppercase tracking-widest text-muted-foreground">{t('settings.maint.dbSize')}</p>
                                 {maintenanceStatsQuery.isLoading ? (
                                   <div className="h-5 w-20 rounded bg-muted-foreground/20 animate-pulse mt-0.5" />
                                 ) : (
@@ -2457,26 +2445,26 @@ export default function SettingsPanel({
                                 )}
                               </div>
                               <div className="rounded-lg border border-border/50 bg-card/40 px-3 py-2">
-                                <p className="text-[11px] uppercase tracking-widest text-muted-foreground">Total Rows</p>
+                                <p className="text-[11px] uppercase tracking-widest text-muted-foreground">{t('settings.maint.totalRows')}</p>
                                 {maintenanceStatsQuery.isLoading ? (
                                   <div className="h-5 w-24 rounded bg-muted-foreground/20 animate-pulse mt-0.5" />
                                 ) : (
                                   <p className="text-sm font-semibold">
                                     {maintenanceStatsQuery.data?.total_rows != null
                                       ? maintenanceStatsQuery.data.total_rows.toLocaleString()
-                                      : 'Unavailable'}
+                                      : t('settings.maint.unavailable')}
                                   </p>
                                 )}
                               </div>
                             </div>
 
                             {maintenanceStatsQuery.isError && (
-                              <p className="text-[11px] text-red-400">Unable to load database metrics.</p>
+                              <p className="text-[11px] text-red-400">{t('settings.maint.dbMetricsError')}</p>
                             )}
 
                             {!maintenanceStatsQuery.isLoading && maintenanceStatsQuery.dataUpdatedAt > 0 && (
                               <p className="text-[10px] text-muted-foreground">
-                                Updated {new Date(maintenanceStatsQuery.dataUpdatedAt).toLocaleString()}
+                                {t('settings.maint.updated')} {new Date(maintenanceStatsQuery.dataUpdatedAt).toLocaleString()}
                               </p>
                             )}
                           </CardContent>
@@ -2498,13 +2486,13 @@ export default function SettingsPanel({
                               <CardContent className="p-3 space-y-2">
                                 <div className="flex items-center justify-between">
                                   <div>
-                                    <p className="font-medium text-sm">Dead Tuples & Index Bloat</p>
+                                    <p className="font-medium text-sm">{t('settings.maint.deadTuplesTitle')}</p>
                                     <p className="text-xs text-muted-foreground">
-                                      {totalDead.toLocaleString()} dead / {totalLive.toLocaleString()} live
-                                      {totalLive > 0 && ` (${(100 * totalDead / totalLive).toFixed(1)}%)`}
+                                      {t('settings.maint.deadLive', { dead: totalDead.toLocaleString(), live: totalLive.toLocaleString() })}
+                                      {totalLive > 0 && ` ${t('settings.maint.pctOf', { pct: (100 * totalDead / totalLive).toFixed(1) })}`}
                                       {totalIndexBytes > 0 && totalTableBytes > 0 && (
                                         <span className={cn('ml-2', totalIndexBytes > totalTableBytes * 3 && 'text-amber-400')}>
-                                          Idx: {fmtBytes(totalIndexBytes)} / Data: {fmtBytes(totalTableBytes)}
+                                          {t('settings.maint.idxData', { idx: fmtBytes(totalIndexBytes), data: fmtBytes(totalTableBytes) })}
                                         </span>
                                       )}
                                     </p>
@@ -2517,12 +2505,12 @@ export default function SettingsPanel({
                                       className="h-7 px-2 text-xs"
                                       onClick={() => vacuumMutation.mutate(false)}
                                       disabled={anyMutationPending}
-                                      title="Reclaim dead tuples (non-blocking)"
+                                      title={t('settings.maint.vacuumTip')}
                                     >
                                       {vacuumMutation.isPending && !vacuumMutation.variables
                                         ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                                         : <RefreshCw className="w-3 h-3 mr-1" />}
-                                      Vacuum
+                                      {t('settings.maint.vacuum')}
                                     </Button>
                                     <Button
                                       type="button"
@@ -2531,12 +2519,12 @@ export default function SettingsPanel({
                                       className="h-7 px-2 text-xs border-amber-500/40 text-amber-400 hover:bg-amber-500/10"
                                       onClick={() => vacuumMutation.mutate(true)}
                                       disabled={anyMutationPending}
-                                      title="Rewrites tables to reclaim disk. Takes exclusive lock — avoid during active trading."
+                                      title={t('settings.maint.fullTip')}
                                     >
                                       {vacuumMutation.isPending && vacuumMutation.variables
                                         ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                                         : <RefreshCw className="w-3 h-3 mr-1" />}
-                                      Full
+                                      {t('settings.maint.full')}
                                     </Button>
                                     <Button
                                       type="button"
@@ -2545,34 +2533,34 @@ export default function SettingsPanel({
                                       className="h-7 px-2 text-xs"
                                       onClick={() => reindexMutation.mutate()}
                                       disabled={anyMutationPending}
-                                      title="Rebuild bloated indexes to reclaim disk space"
+                                      title={t('settings.maint.reindexTip')}
                                     >
                                       {reindexMutation.isPending
                                         ? <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                                         : <Database className="w-3 h-3 mr-1" />}
-                                      Reindex
+                                      {t('settings.maint.reindex')}
                                     </Button>
                                   </div>
                                 </div>
 
                                 {bloatedTables.length > 0 && (
                                   <div className="max-h-36 overflow-y-auto text-[11px] space-y-0.5">
-                                    {bloatedTables.map(t => {
-                                      const indexBloated = t.index_bytes > 0 && t.table_bytes > 0 && t.index_bytes > t.table_bytes * 5
+                                    {bloatedTables.map(row => {
+                                      const indexBloated = row.index_bytes > 0 && row.table_bytes > 0 && row.index_bytes > row.table_bytes * 5
                                       return (
-                                        <div key={t.table} className="flex justify-between items-center py-0.5 border-b border-border/20 last:border-0">
-                                          <span className="font-mono text-muted-foreground truncate mr-2">{t.table}</span>
+                                        <div key={row.table} className="flex justify-between items-center py-0.5 border-b border-border/20 last:border-0">
+                                          <span className="font-mono text-muted-foreground truncate mr-2">{row.table}</span>
                                           <div className="flex items-center gap-2">
                                             {indexBloated && (
-                                              <span className="whitespace-nowrap tabular-nums text-amber-400" title={`Index: ${fmtBytes(t.index_bytes)} vs Data: ${fmtBytes(t.table_bytes)}`}>
-                                                idx {fmtBytes(t.index_bytes)}
+                                              <span className="whitespace-nowrap tabular-nums text-amber-400" title={t('settings.maint.indexVsDataTip', { idx: fmtBytes(row.index_bytes), data: fmtBytes(row.table_bytes) })}>
+                                                {t('settings.maint.idxShort', { size: fmtBytes(row.index_bytes) })}
                                               </span>
                                             )}
                                             <span className={cn(
                                               'whitespace-nowrap tabular-nums',
-                                              t.dead_pct > 50 ? 'text-red-400' : t.dead_pct > 10 ? 'text-amber-400' : 'text-muted-foreground',
+                                              row.dead_pct > 50 ? 'text-red-400' : row.dead_pct > 10 ? 'text-amber-400' : 'text-muted-foreground',
                                             )}>
-                                              {t.dead_tuples.toLocaleString()} dead ({t.dead_pct}%)
+                                              {t('settings.maint.deadPct', { n: row.dead_tuples.toLocaleString(), p: row.dead_pct })}
                                             </span>
                                           </div>
                                         </div>
@@ -2583,12 +2571,12 @@ export default function SettingsPanel({
 
                                 {indexHeavyTables.length > 0 && bloatedTables.length === 0 && (
                                   <div className="max-h-36 overflow-y-auto text-[11px] space-y-0.5">
-                                    <p className="text-[10px] text-amber-400/80 mb-1">Tables with bloated indexes (index &gt; 5x data):</p>
-                                    {indexHeavyTables.map(t => (
-                                      <div key={t.table} className="flex justify-between items-center py-0.5 border-b border-border/20 last:border-0">
-                                        <span className="font-mono text-muted-foreground truncate mr-2">{t.table}</span>
+                                    <p className="text-[10px] text-amber-400/80 mb-1">{t('settings.maint.bloatedIdxNote')}</p>
+                                    {indexHeavyTables.map(row => (
+                                      <div key={row.table} className="flex justify-between items-center py-0.5 border-b border-border/20 last:border-0">
+                                        <span className="font-mono text-muted-foreground truncate mr-2">{row.table}</span>
                                         <span className="whitespace-nowrap tabular-nums text-amber-400">
-                                          idx {fmtBytes(t.index_bytes)} / data {fmtBytes(t.table_bytes)}
+                                          {t('settings.maint.idxDataShort', { idx: fmtBytes(row.index_bytes), data: fmtBytes(row.table_bytes) })}
                                         </span>
                                       </div>
                                     ))}
@@ -2602,8 +2590,8 @@ export default function SettingsPanel({
                         <Card className="bg-muted">
                           <CardContent className="flex items-center justify-between p-3">
                             <div>
-                              <p className="font-medium text-sm">Auto Cleanup</p>
-                              <p className="text-xs text-muted-foreground">Automatically delete old records</p>
+                              <p className="font-medium text-sm">{t('settings.maint.autoCleanupTitle')}</p>
+                              <p className="text-xs text-muted-foreground">{t('settings.maint.autoCleanupSub')}</p>
                             </div>
                             <Switch
                               checked={maintenanceForm.auto_cleanup_enabled}
@@ -2614,7 +2602,7 @@ export default function SettingsPanel({
 
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                           <div>
-                            <Label className="text-xs text-muted-foreground">Cleanup Interval (hours)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.cleanupIntervalHours')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_interval_hours}
@@ -2626,7 +2614,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">Keep Resolved Trades (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.keepResolvedTradesDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_resolved_trade_days}
@@ -2638,7 +2626,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">LLM Usage Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.llmUsageRetentionDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.llm_usage_retention_days}
@@ -2653,7 +2641,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">Trader Events Firehose Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.traderFirehoseDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.trader_events_firehose_retention_days}
@@ -2668,7 +2656,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">Trader Events Other Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.traderOtherDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.trader_events_other_retention_days}
@@ -2685,7 +2673,7 @@ export default function SettingsPanel({
 
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                           <div>
-                            <Label className="text-xs text-muted-foreground">Wallet Monitor Events Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.walletMonitorEventsDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_wallet_monitor_events_days}
@@ -2700,7 +2688,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">Decision Checks Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.decisionChecksDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_trader_decision_checks_days}
@@ -2715,7 +2703,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">Decisions Retention (days, unreferenced only)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.decisionsDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_trader_decisions_days}
@@ -2730,7 +2718,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">Opportunity History Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.opportunityHistoryDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_opportunity_history_days}
@@ -2747,7 +2735,7 @@ export default function SettingsPanel({
 
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                           <div>
-                            <Label className="text-xs text-muted-foreground">Signal Emission Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.signalEmissionDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_trade_signal_emission_days}
@@ -2762,7 +2750,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">Trade Signal Update Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.signalUpdateDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_trade_signal_update_days}
@@ -2777,7 +2765,7 @@ export default function SettingsPanel({
                           </div>
 
                           <div>
-                            <Label className="text-xs text-muted-foreground">Wallet Activity Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.walletActivityDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.cleanup_wallet_activity_rollup_days}
@@ -2792,9 +2780,9 @@ export default function SettingsPanel({
                         <Card className="bg-muted">
                           <CardContent className="flex items-center justify-between p-3">
                             <div>
-                              <p className="font-medium text-sm">Wallet Activity Duplicate Cleanup</p>
+                              <p className="font-medium text-sm">{t('settings.maint.walletDedupeTitle')}</p>
                               <p className="text-xs text-muted-foreground">
-                                Remove duplicate rollups during scheduled maintenance
+                                {t('settings.maint.walletDedupeSub')}
                               </p>
                             </div>
                             <Switch
@@ -2807,9 +2795,9 @@ export default function SettingsPanel({
                         <Card className="bg-muted">
                           <CardContent className="flex items-center justify-between p-3">
                             <div>
-                              <p className="font-medium text-sm">Market Metadata Hygiene</p>
+                              <p className="font-medium text-sm">{t('settings.maint.metadataHygieneTitle')}</p>
                               <p className="text-xs text-muted-foreground">
-                                Prune stale or poisoned cached market names/slugs
+                                {t('settings.maint.metadataHygieneSub')}
                               </p>
                             </div>
                             <Switch
@@ -2821,7 +2809,7 @@ export default function SettingsPanel({
 
                         <div className="grid grid-cols-2 gap-3">
                           <div>
-                            <Label className="text-xs text-muted-foreground">Metadata Hygiene Interval (hours)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.hygieneIntervalHours')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.market_cache_hygiene_interval_hours}
@@ -2832,7 +2820,7 @@ export default function SettingsPanel({
                             />
                           </div>
                           <div>
-                            <Label className="text-xs text-muted-foreground">Metadata Retention (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.metadataRetentionDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.market_cache_retention_days}
@@ -2846,7 +2834,7 @@ export default function SettingsPanel({
 
                         <div className="grid grid-cols-3 gap-3">
                           <div>
-                            <Label className="text-xs text-muted-foreground">Reference Lookback (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.referenceLookbackDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.market_cache_reference_lookback_days}
@@ -2857,7 +2845,7 @@ export default function SettingsPanel({
                             />
                           </div>
                           <div>
-                            <Label className="text-xs text-muted-foreground">Weak Entry Grace (days)</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.weakEntryGraceDays')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.market_cache_weak_entry_grace_days}
@@ -2868,7 +2856,7 @@ export default function SettingsPanel({
                             />
                           </div>
                           <div>
-                            <Label className="text-xs text-muted-foreground">Max Entries Per Slug</Label>
+                            <Label className="text-xs text-muted-foreground">{t('settings.maint.maxEntriesPerSlug')}</Label>
                             <Input
                               type="number"
                               value={maintenanceForm.market_cache_max_entries_per_slug}
@@ -2883,12 +2871,12 @@ export default function SettingsPanel({
                         <Card className="bg-red-500/5 border-red-500/20">
                           <CardContent className="p-3 space-y-3">
                             <div>
-                              <p className="font-medium text-sm">Manual Data Flush</p>
+                              <p className="font-medium text-sm">{t('settings.maint.flushTitle')}</p>
                               <p className="text-xs text-muted-foreground">
-                                Manually clear runtime/cache datasets for scanner, weather, news, and trader orchestrator pipelines.
+                                {t('settings.maint.flushDesc')}
                               </p>
                               <p className="text-[11px] text-emerald-400/80 mt-1">
-                                Protected automatically: live/executed positions and trade history.
+                                {t('settings.maint.flushProtected')}
                               </p>
                             </div>
 
@@ -2903,7 +2891,7 @@ export default function SettingsPanel({
                                 {flushDataMutation.isPending && activeFlushTarget === 'scanner'
                                   ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
                                   : <Trash2 className="w-3.5 h-3.5 mr-1.5" />}
-                                Flush Scanner/Market
+                                {t('settings.maint.flushScanner')}
                               </Button>
 
                               <Button
@@ -2916,7 +2904,7 @@ export default function SettingsPanel({
                                 {flushDataMutation.isPending && activeFlushTarget === 'weather'
                                   ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
                                   : <Trash2 className="w-3.5 h-3.5 mr-1.5" />}
-                                Flush Weather
+                                {t('settings.maint.flushWeather')}
                               </Button>
 
                               <Button
@@ -2929,7 +2917,7 @@ export default function SettingsPanel({
                                 {flushDataMutation.isPending && activeFlushTarget === 'news'
                                   ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
                                   : <Trash2 className="w-3.5 h-3.5 mr-1.5" />}
-                                Flush News
+                                {t('settings.maint.flushNews')}
                               </Button>
 
                               <Button
@@ -2942,7 +2930,7 @@ export default function SettingsPanel({
                                 {flushDataMutation.isPending && activeFlushTarget === 'trader_orchestrator'
                                   ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
                                   : <Trash2 className="w-3.5 h-3.5 mr-1.5" />}
-                                Flush Trader Orchestrator Runtime
+                                {t('settings.maint.flushOrchestrator')}
                               </Button>
                             </div>
 
@@ -2957,7 +2945,7 @@ export default function SettingsPanel({
                                 {flushDataMutation.isPending && activeFlushTarget === 'all'
                                   ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
                                   : <Trash2 className="w-3.5 h-3.5 mr-1.5" />}
-                                Flush All Non-Trading Data
+                                {t('settings.maint.flushAll')}
                               </Button>
 
                               <Button
@@ -2969,11 +2957,11 @@ export default function SettingsPanel({
                                 {runOrchestratorOnceMutation.isPending
                                   ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
                                   : <Play className="w-3.5 h-3.5 mr-1.5" />}
-                                Run Trader Orchestrator Once
+                                {t('settings.maint.runOrchOnce')}
                               </Button>
 
                               <p className="text-[10px] text-muted-foreground">
-                                Trader orchestrator run is non-destructive and queues one immediate cycle.
+                                {t('settings.maint.runOrchNote')}
                               </p>
                             </div>
                           </CardContent>
@@ -2985,7 +2973,7 @@ export default function SettingsPanel({
                       <div className="flex items-center gap-2">
                         <Button size="sm" onClick={() => handleSaveSection('maintenance')} disabled={saveMutation.isPending}>
                           <Save className="w-3.5 h-3.5 mr-1.5" />
-                          Save
+                          {t('settings.actions.save')}
                         </Button>
                       </div>
                     </div>
@@ -3019,6 +3007,7 @@ interface MarketTagFilterSectionProps {
 }
 
 function MarketTagFilterSection({ selectedTags, onChange }: MarketTagFilterSectionProps) {
+  const { t } = useTranslation()
   const [draft, setDraft] = useState('')
 
   const availableTagsQuery = useQuery({
@@ -3057,18 +3046,16 @@ function MarketTagFilterSection({ selectedTags, onChange }: MarketTagFilterSecti
       <div className="flex items-center gap-2">
         <Tag className="w-3.5 h-3.5 text-muted-foreground" />
         <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-          Market Tag Filter
+          {t('settings.tags.title')}
         </p>
       </div>
       <p className="text-[11px] text-muted-foreground/80 leading-relaxed">
-        Limit which markets the scanner ingests. Markets must carry at least one
-        matching tag (OR-logic, case-insensitive). Empty list = no filter applied —
-        the scanner ingests every Polymarket / Kalshi market as today.
+        {t('settings.tags.desc')}
       </p>
       <div className="flex flex-wrap items-center gap-1.5">
         {selectedTags.length === 0 ? (
           <span className="text-[11px] italic text-muted-foreground/70">
-            No tags selected — filter inactive.
+            {t('settings.tags.noneSelected')}
           </span>
         ) : (
           selectedTags.map((tag) => (
@@ -3082,7 +3069,7 @@ function MarketTagFilterSection({ selectedTags, onChange }: MarketTagFilterSecti
                 type="button"
                 onClick={() => removeTag(tag)}
                 className="rounded-full hover:bg-muted-foreground/20 p-0.5 transition-colors"
-                aria-label={`Remove ${tag}`}
+                aria-label={t('settings.tags.removeTag', { tag })}
               >
                 <X className="w-3 h-3" />
               </button>
@@ -3102,13 +3089,13 @@ function MarketTagFilterSection({ selectedTags, onChange }: MarketTagFilterSecti
               handleSubmitDraft()
             }
           }}
-          placeholder="Type or pick a tag, press Enter"
+          placeholder={t('settings.tags.placeholder')}
           className="text-sm"
         />
         <datalist id={datalistId}>
           {suggestions.map((entry) => (
             <option key={entry.name} value={entry.name}>
-              {`${entry.name} - seen ${entry.occurrences}x in last 24h`}
+              {t('settings.tags.suggestion', { name: entry.name, n: entry.occurrences })}
             </option>
           ))}
         </datalist>
@@ -3118,29 +3105,26 @@ function MarketTagFilterSection({ selectedTags, onChange }: MarketTagFilterSecti
           onClick={handleSubmitDraft}
           disabled={!draft.trim()}
         >
-          Add
+          {t('settings.tags.add')}
         </Button>
       </div>
       <div className="text-[10px] text-muted-foreground/70">
         {availableTagsQuery.isLoading ? (
           <span className="inline-flex items-center gap-1">
             <Loader2 className="w-3 h-3 animate-spin" />
-            Loading tag suggestions...
+            {t('settings.tags.loading')}
           </span>
         ) : availableTagsQuery.isError ? (
           <span className="text-destructive/80">
-            Failed to load tag suggestions - try again later.
+            {t('settings.tags.error')}
           </span>
         ) : (availableTagsQuery.data?.total ?? 0) === 0 ? (
           <span>
-            No tags ingested yet - the list is populated from live Polymarket
-            traffic and refreshes within one ingest cycle.
+            {t('settings.tags.empty')}
           </span>
         ) : (
           <span>
-            {availableTagsQuery.data?.total ?? 0} distinct tag
-            {(availableTagsQuery.data?.total ?? 0) === 1 ? '' : 's'} seen in the
-            last 24 h.
+            {t('settings.tags.seenCount', { count: availableTagsQuery.data?.total ?? 0 })}
           </span>
         )}
       </div>
