@@ -2203,7 +2203,7 @@ async def ai_chat(
     try:
         from services.ai import get_llm_manager
         from services.ai.chat_memory import chat_memory_service
-        from services.ai.llm_provider import LLMMessage, ZHIPU_GLM5_MAX_OUTPUT_TOKENS
+        from services.ai.llm_provider import LLMMessage
 
         manager = get_llm_manager()
         if not manager.is_available():

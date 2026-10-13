@@ -259,6 +259,12 @@ _PLANE_CONFIGS: dict[str, dict[str, Any]] = {
             # itself skips the refit when the model is still fresh, so a
             # warm model adds no startup cost.
             "workers.cox_trainer_worker",
+            # Scheduled autoresearch auto-trigger (consumes the
+            # ``autoresearch_interval_seconds`` setting; <=0 disables).
+            # Each experiment is LLM proposal + unified backtest, so it
+            # carries the same GIL/heaviness profile as the backtest
+            # worker above — same plane, same one-at-a-time bounding.
+            "workers.autoresearch_worker",
         ),
         "runtime_names": (),
         "load_strategy_registry": False,

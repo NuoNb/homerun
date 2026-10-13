@@ -47,6 +47,12 @@ _HEX_TOKEN_ID_RE = re.compile(r"^(?:0x)?[0-9a-f]{40,}$")
 _CONDITION_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _execution_estimator = ExecutionEstimator()
 
+# Strong references for fire-and-forget tasks (fill notifications, spend
+# accounting).  The event loop only keeps weak refs to tasks — without a
+# strong reference the GC can cancel one mid-flight, silently losing a
+# daily-spend increment and letting a trader exceed its cap.
+_background_tasks: set[asyncio.Task] = set()
+
 
 @dataclass
 class LegSubmitResult:
@@ -1323,7 +1329,7 @@ async def submit_execution_leg(
                 if strategy_slug:
                     from services.strategy_callbacks import dispatch_on_fill
 
-                    asyncio.create_task(
+                    _task = asyncio.create_task(
                         dispatch_on_fill(
                             strategy_slug=strategy_slug,
                             order=signal,
@@ -1334,6 +1340,8 @@ async def submit_execution_leg(
                             ensemble_snapshot=ensemble.to_dict(),
                         )
                     )
+                    _background_tasks.add(_task)
+                    _task.add_done_callback(_background_tasks.discard)
             except Exception:
                 pass  # never raise from a fill notification
 
@@ -1540,7 +1548,7 @@ async def submit_execution_leg(
             if strategy_slug:
                 from services.strategy_callbacks import dispatch_on_fill
 
-                asyncio.create_task(
+                _task = asyncio.create_task(
                     dispatch_on_fill(
                         strategy_slug=strategy_slug,
                         order=signal,
@@ -1551,6 +1559,8 @@ async def submit_execution_leg(
                         ensemble_snapshot=None,  # live has no simulator ensemble
                     )
                 )
+                _background_tasks.add(_task)
+                _task.add_done_callback(_background_tasks.discard)
         except Exception:
             pass  # never raise from a fill notification
         # Advance the per-trader daily-spend counter ONLY for real (live)
@@ -1562,9 +1572,11 @@ async def submit_execution_leg(
             _filled_price = float(execution.effective_price or 0.0)
             _live_filled_notional = _live_filled * _filled_price
             if _live_filled_notional > 0.0:
-                asyncio.create_task(
+                _spend_task = asyncio.create_task(
                     record_spend_usd(str(trader_id), _live_filled_notional)
                 )
+                _background_tasks.add(_spend_task)
+                _spend_task.add_done_callback(_background_tasks.discard)
 
     # Stamp the wrapper-level total + merge our leg sub-stages INTO
     # the inner place_order ``submit_breakdown`` dict so the
