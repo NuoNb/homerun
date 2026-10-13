@@ -23,17 +23,26 @@ ones.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from models.database import AsyncSessionLocal, Strategy
+from models.database import AsyncSessionLocal, AutoresearchExperiment, Strategy
 from utils.logger import get_logger
 from utils.utcnow import utcnow
 
 logger = get_logger("workers.autoresearch")
 
 _POLL_SECONDS = 30.0
+# An experiment row counts as "running elsewhere" only while it stays
+# fresh.  The service's in-memory ``_active_experiments`` lock is
+# per-process — the API process (SSE/MCP/UI) can't see this worker's
+# lock and vice versa, so the shared DB row is the only cross-process
+# truth.  A crashed process leaves ``status='running'`` frozen; its
+# ``updated_at`` goes stale (every live iteration refreshes it) and the
+# row stops blocking.  Generous margin: a healthy experiment writes at
+# least every few minutes.
+_RUNNING_EXPERIMENT_FRESH_SECONDS = 3600.0
 
 
 async def _load_settings() -> dict:
@@ -50,6 +59,35 @@ async def _enabled_strategy_ids() -> list[str]:
             )
         ).scalars().all()
     return [str(row) for row in rows]
+
+
+async def _has_running_experiment_elsewhere(strategy_id: str) -> bool:
+    """Cross-process duplicate guard.
+
+    The service locks per strategy in memory only, so an experiment
+    started from the API (SSE endpoint, MCP tool, BacktestStudio) is
+    invisible to this worker process.  Concurrent experiments on the
+    same strategy double the LLM spend and race on auto-apply, so check
+    the shared experiment row before starting our own.
+    """
+    cutoff = utcnow().timestamp() - _RUNNING_EXPERIMENT_FRESH_SECONDS
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(AutoresearchExperiment.updated_at).where(
+                    AutoresearchExperiment.strategy_id == strategy_id,
+                    AutoresearchExperiment.status == "running",
+                )
+            )
+        ).scalars().all()
+    for updated in rows:
+        if updated is None:
+            continue
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        if updated.timestamp() >= cutoff:
+            return True
+    return False
 
 
 async def _run_experiment(strategy_id: str) -> str:
@@ -125,6 +163,19 @@ async def start_loop() -> None:
 
         strategy_id = strategy_ids[cursor % len(strategy_ids)]
         cursor += 1
+        try:
+            if await _has_running_experiment_elsewhere(strategy_id):
+                logger.info(
+                    "Autoresearch worker: experiment already running elsewhere",
+                    strategy_id=strategy_id,
+                )
+                last_finished_at = utcnow()
+                continue
+        except Exception:
+            logger.exception(
+                "Autoresearch worker: duplicate-experiment check failed",
+                strategy_id=strategy_id,
+            )
         started_at = utcnow()
         try:
             final_event = await _run_experiment(strategy_id)
