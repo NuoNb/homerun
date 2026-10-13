@@ -18,6 +18,7 @@ import difflib
 import json
 import time
 import uuid
+from datetime import timezone
 from typing import Any, AsyncGenerator, Optional
 
 from sqlalchemy import desc, select, update
@@ -51,6 +52,10 @@ from utils.logger import get_logger
 from utils.utcnow import utcnow
 
 logger = get_logger(__name__)
+
+# A ``running`` experiment row whose ``updated_at`` is fresher than this is
+# considered owned by a live process elsewhere (see ``_resolve_runtime_status``).
+_ORPHAN_GRACE_SECONDS = 1800.0
 
 
 def _resolve_autoresearch_status(
@@ -546,6 +551,20 @@ class AutoresearchService:
         if active_experiment_id is not None and active_experiment_id != row.id:
             self._active_experiments.pop(session_key, None)
             self._stop_flags.pop(session_key, None)
+
+        # Cross-process grace: ``_active_experiments`` is per-process, but a
+        # running row can be owned by another process (scheduled worker on the
+        # jobs plane, an API SSE session).  A live owner refreshes
+        # ``updated_at`` on every iteration, so a fresh row means "running
+        # elsewhere" — keep it running.  Only stale rows (crashed owner)
+        # fall through to the orphan-failed path.
+        if resolved_status == "failed":
+            updated = getattr(row, "updated_at", None)
+            if updated is not None:
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                if (utcnow() - updated).total_seconds() < _ORPHAN_GRACE_SECONDS:
+                    return "running"
 
         if resolved_status == row.status:
             return resolved_status

@@ -103,3 +103,46 @@ async def test_load_autoresearch_settings_interval_semantics(monkeypatch) -> Non
     )
     settings = await load_autoresearch_settings()
     assert settings["interval_seconds"] == 600
+
+
+@pytest.mark.asyncio
+async def test_resolve_runtime_status_keeps_fresh_cross_process_row_running() -> None:
+    """A running row refreshed recently belongs to another process — the
+    in-memory lock check alone must not mark it failed."""
+    from datetime import timedelta
+
+    from utils.utcnow import utcnow
+
+    service = AutoresearchService()
+    service._active_experiments.clear()
+    service._stop_flags.clear()
+    session = _FakeSession()
+    row = _FakeExperiment("exp-1", "running")
+    row.updated_at = utcnow() - timedelta(minutes=5)
+
+    status = await service._resolve_runtime_status(session, row, "strategy:slug")
+
+    assert status == "running"
+    assert row.status == "running"
+    assert not session.committed
+
+
+@pytest.mark.asyncio
+async def test_resolve_runtime_status_fails_stale_cross_process_row() -> None:
+    """A running row untouched past the grace window is a crashed orphan."""
+    from datetime import timedelta
+
+    from utils.utcnow import utcnow
+
+    service = AutoresearchService()
+    service._active_experiments.clear()
+    service._stop_flags.clear()
+    session = _FakeSession()
+    row = _FakeExperiment("exp-1", "running")
+    row.updated_at = utcnow() - timedelta(hours=2)
+
+    status = await service._resolve_runtime_status(session, row, "strategy:slug")
+
+    assert status == "failed"
+    assert row.status == "failed"
+    assert session.committed
