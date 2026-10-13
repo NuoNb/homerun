@@ -6,12 +6,9 @@
       "tail_end_carry"
     ],
     "include_running_trader_params": true,
-    "windows_utc": [
-      {
-        "start": "2026-06-26T15:00:00Z",
-        "end": "2026-06-27T15:00:00Z"
-      }
-    ],
+    "rolling_window_hours": 3,
+    "window_hours": 1,
+    "exclude_recent_minutes": 15,
     "max_runs_per_cycle": 2,
     "poll_timeout_seconds": 2400,
     "poll_interval_seconds": 10.0,
