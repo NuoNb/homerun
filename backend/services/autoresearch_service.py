@@ -92,10 +92,13 @@ async def load_autoresearch_settings() -> dict[str, Any]:
         row = (await session.execute(select(AppSettings).where(AppSettings.id == "default"))).scalar_one_or_none()
         if row is None:
             return _defaults()
+        # 0 is a meaningful "scheduling disabled" value for the interval —
+        # only a missing/NULL column falls back to the default cadence.
+        interval_raw = getattr(row, "autoresearch_interval_seconds", None)
         return {
             "model": getattr(row, "autoresearch_model", None),
             "max_iterations": getattr(row, "autoresearch_max_iterations", 50) or 50,
-            "interval_seconds": getattr(row, "autoresearch_interval_seconds", 600) or 600,
+            "interval_seconds": 600 if interval_raw is None else int(interval_raw),
             "temperature": getattr(row, "autoresearch_temperature", 0.2) or 0.2,
             "mandate": getattr(row, "autoresearch_mandate", None),
             "auto_apply": bool(getattr(row, "autoresearch_auto_apply", True)),

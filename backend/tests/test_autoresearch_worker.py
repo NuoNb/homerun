@@ -100,11 +100,9 @@ async def test_start_loop_gate_interval_and_round_robin(monkeypatch, fake_ai):
         return list(strategies)
 
     ran: list[str] = []
-    finished: dict[str, str] = {}
 
     async def _fake_run(strategy_id):
         ran.append(strategy_id)
-        finished[strategy_id] = "done"
         return "done"
 
     monkeypatch.setattr(worker, "_run_experiment", _fake_run)

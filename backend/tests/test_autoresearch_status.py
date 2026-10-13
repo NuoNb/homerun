@@ -57,3 +57,49 @@ async def test_resolve_runtime_status_keeps_owned_active_experiment_running() ->
     assert row.status == "running"
     assert row.finished_at is None
     assert not session.committed
+
+
+@pytest.mark.asyncio
+async def test_load_autoresearch_settings_interval_semantics(monkeypatch) -> None:
+    """0 means scheduling disabled; only a missing column falls back to 600."""
+    from services.autoresearch_service import load_autoresearch_settings
+
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def scalar_one_or_none(self):
+            return self._row
+
+    class _FakeSession:
+        def __init__(self, row):
+            self._row = row
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def execute(self, *_a, **_kw):
+            return _Result(self._row)
+
+    class _RowWithZeroInterval:
+        autoresearch_interval_seconds = 0
+
+    class _RowWithoutColumn:
+        pass
+
+    monkeypatch.setattr(
+        "services.autoresearch_service.AsyncSessionLocal",
+        lambda: _FakeSession(_RowWithZeroInterval()),
+    )
+    settings = await load_autoresearch_settings()
+    assert settings["interval_seconds"] == 0
+
+    monkeypatch.setattr(
+        "services.autoresearch_service.AsyncSessionLocal",
+        lambda: _FakeSession(_RowWithoutColumn()),
+    )
+    settings = await load_autoresearch_settings()
+    assert settings["interval_seconds"] == 600

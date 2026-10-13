@@ -311,6 +311,7 @@ _PLANE_CONFIGS: dict[str, dict[str, Any]] = {
             # here gives full process isolation from the live
             # orchestrator.  See workers/backtest_worker.py.
             "workers.backtest_worker",
+            "workers.autoresearch_worker",
         ),
         "runtime_names": (
             "trader_orchestrator",
