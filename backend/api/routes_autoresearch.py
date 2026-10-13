@@ -11,7 +11,7 @@ import json
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 from utils.logger import get_logger
@@ -29,13 +29,22 @@ router = APIRouter(prefix="/autoresearch", tags=["Autoresearch"])
 class AutoresearchSettingsRequest(BaseModel):
     model: Optional[str] = None
     max_iterations: Optional[int] = Field(default=None, ge=1, le=500)
-    interval_seconds: Optional[int] = Field(default=None, ge=60, le=7200)
+    # 0 = scheduled auto-trigger disabled (workers read this as "off");
+    # 1-59 stays rejected so a fat-fingered small value can't hammer the LLM.
+    interval_seconds: Optional[int] = None
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     mandate: Optional[str] = None
     auto_apply: Optional[bool] = None
     walk_forward_windows: Optional[int] = Field(default=None, ge=1, le=20)
     train_ratio: Optional[float] = Field(default=None, ge=0.5, le=0.9)
     mode: Optional[str] = Field(default=None, pattern="^(params|code)$")
+
+    @field_validator("interval_seconds")
+    @classmethod
+    def _interval_zero_or_sixty_plus(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and value != 0 and not (60 <= value <= 7200):
+            raise ValueError("interval_seconds must be 0 (disabled) or 60-7200")
+        return value
 
 
 class AutoresearchStartRequest(BaseModel):
