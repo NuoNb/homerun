@@ -185,6 +185,7 @@ const WORKER_HEALTH_ORDER = [
   'trader_reconciliation',
   'redeemer',
   'events',
+  'autoresearch',
 ] as const
 
 const WORKER_HEALTH_ORDER_SET = new Set<string>(WORKER_HEALTH_ORDER)
@@ -201,6 +202,7 @@ const WORKER_HEALTH_LABEL_KEYS: Record<string, string> = {
   trader_reconciliation: 'workers.reconciliation',
   redeemer: 'workers.redeemer',
   events: 'workers.events',
+  autoresearch: 'workers.autoresearch',
 }
 
 const STRATEGY_SUBTYPE_LABELS: Record<string, Record<string, string>> = {
@@ -376,6 +378,7 @@ function resolveWorkerHealth(
     && !activityKey.startsWith('idle')
     && !activityKey.startsWith('paused')
     && !activityKey.startsWith('disabled')
+    && activityKey !== 'scheduled research disabled'
     && !activityKey.startsWith('stopped')
     && !activityKey.startsWith('waiting')
     && !activityKey.startsWith('blocked')

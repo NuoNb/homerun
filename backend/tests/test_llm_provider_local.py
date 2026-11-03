@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -426,3 +428,32 @@ async def test_zhipu_chat_dials_down_thinking_without_tools(monkeypatch):
     assert "reasoning_effort" not in requests[1]["json"]
     assert "thinking" not in requests[3]["json"]
     assert "reasoning_effort" not in requests[3]["json"]
+
+
+@pytest.mark.asyncio
+async def test_initialize_reports_failure_even_when_previous_provider_is_available(monkeypatch):
+    manager = LLMManager()
+    previous_provider = object()
+    manager._providers[LLMProvider.OPENAI] = previous_provider
+    session = AsyncMock()
+    session.execute.side_effect = RuntimeError("temporary database failure")
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    monkeypatch.setattr(llm_provider, "AsyncSessionLocal", lambda: context)
+
+    assert await manager.initialize() is False
+    assert manager.is_available() is True
+    assert manager._providers[LLMProvider.OPENAI] is previous_provider
+
+
+@pytest.mark.asyncio
+async def test_initialize_reports_success_after_loading_empty_configuration(monkeypatch):
+    manager = LLMManager()
+    session = AsyncMock()
+    session.execute.return_value = SimpleNamespace(scalar_one_or_none=lambda: None)
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    monkeypatch.setattr(llm_provider, "AsyncSessionLocal", lambda: context)
+
+    assert await manager.initialize() is True
+    assert manager.is_available() is False

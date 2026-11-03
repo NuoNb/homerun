@@ -1,148 +1,95 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
-from services.autoresearch_service import AutoresearchService, _resolve_autoresearch_status
-
-
-class _FakeSession:
-    def __init__(self) -> None:
-        self.committed = False
-
-    async def commit(self) -> None:
-        self.committed = True
-
-
-class _FakeExperiment:
-    def __init__(self, experiment_id: str, status: str) -> None:
-        self.id = experiment_id
-        self.status = status
-        self.finished_at = None
-        self.updated_at = None
-
-
-def test_resolve_autoresearch_status_requires_matching_active_experiment() -> None:
-    assert _resolve_autoresearch_status("exp-1", "running", "exp-1") == "running"
-    assert _resolve_autoresearch_status("exp-1", "running", None) == "failed"
-    assert _resolve_autoresearch_status("exp-1", "completed", None) == "completed"
+from services.autoresearch_service import AutoresearchService, load_autoresearch_settings
+from utils.utcnow import utcnow
 
 
 @pytest.mark.asyncio
-async def test_resolve_runtime_status_marks_orphaned_running_experiment_failed() -> None:
+@pytest.mark.parametrize("stored_status", ["failed", "completed", "paused"])
+async def test_terminal_status_is_stable_across_repeated_reads(stored_status):
     service = AutoresearchService()
-    service._active_experiments.clear()
-    service._stop_flags.clear()
-    session = _FakeSession()
-    row = _FakeExperiment("exp-1", "running")
+    row = SimpleNamespace(id="terminal-experiment", status=stored_status, updated_at=utcnow())
+    session = AsyncMock()
 
-    status = await service._resolve_runtime_status(session, row, "strategy:tail-end-carry")
+    first = await service._resolve_runtime_status(session, row)
+    second = await service._resolve_runtime_status(session, row)
 
-    assert status == "failed"
-    assert row.status == "failed"
+    assert (first, second, row.status) == (stored_status, stored_status, stored_status)
+    session.scalar.assert_not_awaited()
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_orphan_stays_failed_after_first_status_query():
+    row = SimpleNamespace(
+        id="orphan-experiment",
+        status="running",
+        trader_id=None,
+        strategy_id="dynamic-strategy",
+        updated_at=utcnow(),
+        finished_at=None,
+    )
+    session = AsyncMock()
+    session.scalar.return_value = True
+    service = AutoresearchService()
+
+    first = await service._resolve_runtime_status(session, row)
+    second = await service._resolve_runtime_status(session, row)
+
+    assert (first, second, row.status) == ("failed", "failed", "failed")
     assert row.finished_at is not None
-    assert row.updated_at is not None
-    assert session.committed
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_resolve_runtime_status_keeps_owned_active_experiment_running() -> None:
-    service = AutoresearchService()
-    service._active_experiments.clear()
-    service._stop_flags.clear()
-    service._active_experiments["strategy:tail-end-carry"] = "exp-1"
-    session = _FakeSession()
-    row = _FakeExperiment("exp-1", "running")
-
-    status = await service._resolve_runtime_status(session, row, "strategy:tail-end-carry")
-
-    assert status == "running"
-    assert row.status == "running"
-    assert row.finished_at is None
-    assert not session.committed
-
-
-@pytest.mark.asyncio
-async def test_load_autoresearch_settings_interval_semantics(monkeypatch) -> None:
-    """0 means scheduling disabled; only a missing column falls back to 600."""
-    from services.autoresearch_service import load_autoresearch_settings
-
-    class _Result:
-        def __init__(self, row):
-            self._row = row
-
-        def scalar_one_or_none(self):
-            return self._row
-
-    class _FakeSession:
-        def __init__(self, row):
-            self._row = row
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
-
-        async def execute(self, *_a, **_kw):
-            return _Result(self._row)
-
-    class _RowWithZeroInterval:
-        autoresearch_interval_seconds = 0
-
-    class _RowWithoutColumn:
-        pass
-
-    monkeypatch.setattr(
-        "services.autoresearch_service.AsyncSessionLocal",
-        lambda: _FakeSession(_RowWithZeroInterval()),
-    )
-    settings = await load_autoresearch_settings()
-    assert settings["interval_seconds"] == 0
-
-    monkeypatch.setattr(
-        "services.autoresearch_service.AsyncSessionLocal",
-        lambda: _FakeSession(_RowWithoutColumn()),
-    )
-    settings = await load_autoresearch_settings()
-    assert settings["interval_seconds"] == 600
-
-
-@pytest.mark.asyncio
-async def test_resolve_runtime_status_keeps_fresh_cross_process_row_running() -> None:
-    """A running row refreshed recently belongs to another process — the
-    in-memory lock check alone must not mark it failed."""
+async def test_status_uses_database_owner_instead_of_timestamp_age():
     from datetime import timedelta
 
-    from utils.utcnow import utcnow
+    row = SimpleNamespace(
+        id="owned-experiment",
+        status="running",
+        trader_id=None,
+        strategy_id="dynamic-strategy",
+        updated_at=utcnow() - timedelta(hours=2),
+    )
+    session = AsyncMock()
+    session.scalar.return_value = False
 
-    service = AutoresearchService()
-    service._active_experiments.clear()
-    service._stop_flags.clear()
-    session = _FakeSession()
-    row = _FakeExperiment("exp-1", "running")
-    row.updated_at = utcnow() - timedelta(minutes=5)
-
-    status = await service._resolve_runtime_status(session, row, "strategy:slug")
-
-    assert status == "running"
-    assert row.status == "running"
-    assert not session.committed
+    assert await AutoresearchService()._resolve_runtime_status(session, row) == "running"
+    session.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_resolve_runtime_status_fails_stale_cross_process_row() -> None:
-    """A running row untouched past the grace window is a crashed orphan."""
-    from datetime import timedelta
+async def test_status_does_not_overwrite_concurrently_completed_experiment():
+    row = SimpleNamespace(id="finished-experiment", status="running", trader_id=None, strategy_id="dynamic-strategy")
+    session = AsyncMock()
+    session.scalar.return_value = True
 
-    from utils.utcnow import utcnow
+    async def refresh(_row):
+        _row.status = "completed"
 
-    service = AutoresearchService()
-    service._active_experiments.clear()
-    service._stop_flags.clear()
-    session = _FakeSession()
-    row = _FakeExperiment("exp-1", "running")
-    row.updated_at = utcnow() - timedelta(hours=2)
+    session.refresh.side_effect = refresh
+    assert await AutoresearchService()._resolve_runtime_status(session, row) == "completed"
+    session.commit.assert_not_awaited()
 
-    status = await service._resolve_runtime_status(session, row, "strategy:slug")
 
-    assert status == "failed"
-    assert row.status == "failed"
-    assert session.committed
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row, expected",
+    [
+        (SimpleNamespace(autoresearch_interval_seconds=0), 0),
+        (SimpleNamespace(autoresearch_interval_seconds=None), 600),
+        (SimpleNamespace(), 600),
+    ],
+)
+async def test_load_autoresearch_settings_interval_semantics(monkeypatch, row, expected):
+    session = AsyncMock()
+    session.execute.return_value = SimpleNamespace(scalar_one_or_none=lambda: row)
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    monkeypatch.setattr("services.autoresearch_service.AsyncSessionLocal", lambda: context)
+
+    assert (await load_autoresearch_settings())["interval_seconds"] == expected

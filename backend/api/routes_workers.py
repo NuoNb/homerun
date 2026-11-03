@@ -6,10 +6,13 @@ import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes_autoresearch import AutoresearchSettingsRequest
 from models.database import (
+    AppSettings,
     AsyncSessionLocal,
     DiscoveryControl,
     NewsWorkflowControl,
@@ -53,6 +56,7 @@ ALLOWED_WORKERS = {
     "redeemer",
     "discovery",
     "events",
+    "autoresearch",
 }
 WORKER_DISPLAY_ORDER = (
     "scanner",
@@ -66,8 +70,9 @@ WORKER_DISPLAY_ORDER = (
     "trader_reconciliation",
     "redeemer",
     "events",
+    "autoresearch",
 )
-GENERIC_WORKERS = ("scanner_slo", "crypto", "tracked_traders", "trader_reconciliation", "redeemer", "events")
+GENERIC_WORKERS = ("scanner_slo", "crypto", "tracked_traders", "trader_reconciliation", "redeemer", "events", "autoresearch")
 DB_RETRY_ATTEMPTS = 3
 DB_RETRY_BASE_DELAY_SECONDS = 0.2
 DB_RETRY_MAX_DELAY_SECONDS = 1.5
@@ -102,7 +107,7 @@ async def _generic_worker_controls(session: AsyncSession) -> dict[str, dict]:
             select(WorkerControl).where(WorkerControl.worker_name.in_(GENERIC_WORKERS))
         )
     ).scalars().all()
-    return {
+    controls = {
         str(row.worker_name): {
             "is_enabled": bool(row.is_enabled),
             "is_paused": bool(row.is_paused),
@@ -111,6 +116,11 @@ async def _generic_worker_controls(session: AsyncSession) -> dict[str, dict]:
         }
         for row in rows
     }
+
+    interval = await session.scalar(select(AppSettings.autoresearch_interval_seconds).where(AppSettings.id == "default"))
+    controls.setdefault("autoresearch", {"is_enabled": True, "is_paused": False, "requested_run_at": None})
+    controls["autoresearch"]["interval_seconds"] = 600 if interval is None else int(interval)
+    return controls
 
 
 async def _scanner_control_payload(session: AsyncSession) -> dict:
@@ -538,13 +548,23 @@ async def run_worker_once(worker: str, session: AsyncSession = Depends(get_db_se
 @router.post("/{worker}/interval")
 async def set_worker_run_interval(
     worker: str,
-    interval_seconds: int = Query(..., ge=1, le=86400),
+    interval_seconds: int = Query(..., ge=0, le=86400),
     session: AsyncSession = Depends(get_db_session),
 ):
     name = _normalize_worker_name(worker)
     _assert_supported_worker(name)
 
-    if name == "scanner":
+    if name == "autoresearch":
+        from services.autoresearch_service import save_autoresearch_settings
+
+        try:
+            request = AutoresearchSettingsRequest(interval_seconds=interval_seconds)
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail="interval_seconds must be 0 (disabled) or 60-7200") from exc
+        await save_autoresearch_settings(request.model_dump(exclude_none=True))
+    elif interval_seconds == 0:
+        raise HTTPException(status_code=400, detail="interval_seconds must be at least 1")
+    elif name == "scanner":
         await shared_state.set_scanner_interval(session, interval_seconds)
     elif name == "news":
         await news_shared_state.set_news_interval(session, interval_seconds)

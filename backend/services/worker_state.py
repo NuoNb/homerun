@@ -76,6 +76,7 @@ DEFAULT_WORKER_INTERVALS: dict[str, int] = {
     "redeemer": 120,
     "discovery": 3600,
     "events": 300,
+    "autoresearch": 600,
 }
 DB_RETRY_ATTEMPTS = 3
 DB_RETRY_BASE_DELAY_SECONDS = 0.05

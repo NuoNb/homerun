@@ -1,224 +1,235 @@
-"""Behavioral tests for the scheduled autoresearch worker loop."""
-from __future__ import annotations
+"""Scheduler behavior with controllable time, AI readiness and worker controls."""
 
 import asyncio
-from pathlib import Path
-import sys
+from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-BACKEND_ROOT = Path(__file__).resolve().parents[1]
-if str(BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(BACKEND_ROOT))
-
 import workers.autoresearch_worker as worker
+from services import ai
+from services.autoresearch_service import autoresearch_service
+from utils.utcnow import utcnow
 
 
-class _FakeLLMManager:
-    def is_available(self) -> bool:
+async def _until(predicate):
+    async with asyncio.timeout(2):
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+
+@pytest.fixture
+def scheduler(monkeypatch):
+    state = SimpleNamespace(
+        settings={"mode": "params", "interval_seconds": 60},
+        control={"is_enabled": True, "is_paused": False, "requested_run_at": None},
+        revision=utcnow(),
+        now=utcnow(),
+        available=True,
+        snapshots=[],
+    )
+    session = AsyncMock()
+
+    async def read_revision(*_args):
+        return state.revision
+
+    session.scalar.side_effect = read_revision
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    monkeypatch.setattr(worker, "AsyncSessionLocal", lambda: context)
+    monkeypatch.setattr(worker, "_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(worker, "utcnow", lambda: state.now)
+    monkeypatch.setattr(worker, "_load_settings", AsyncMock(side_effect=lambda: dict(state.settings)))
+    monkeypatch.setattr(worker, "read_worker_control", AsyncMock(side_effect=lambda *_a, **_kw: dict(state.control)))
+    monkeypatch.setattr(worker, "_enabled_strategy_ids", AsyncMock(return_value=["strategy-a", "strategy-b"]))
+    monkeypatch.setattr(worker, "clear_worker_run_request", AsyncMock())
+    state.run = AsyncMock(return_value="done")
+    monkeypatch.setattr(worker, "_run_experiment", state.run)
+
+    async def snapshot(_session, name, **values):
+        assert name == "autoresearch"
+        state.snapshots.append(values)
+
+    monkeypatch.setattr(worker, "write_worker_snapshot", snapshot)
+    state.manager = SimpleNamespace(is_available=lambda: state.available, initialize=AsyncMock(return_value=True))
+    monkeypatch.setattr(ai, "get_llm_manager", lambda: state.manager)
+    monkeypatch.setattr(ai, "initialize_ai", AsyncMock(return_value=state.manager))
+    return state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["params", "code"])
+async def test_run_experiment_consumes_and_closes_stream(monkeypatch, mode):
+    calls = []
+    closed = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        calls.append((args, kwargs))
+        try:
+            yield {"event": "experiment_start", "data": {}}
+            yield {"event": "done", "data": {"status": "completed"}}
+        finally:
+            closed.set()
+
+    monkeypatch.setattr(autoresearch_service, "run_strategy_params_stream", stream)
+    monkeypatch.setattr(autoresearch_service, "run_code_evolution_stream", stream)
+    assert await worker._run_experiment("strategy-a", mode) == "completed"
+    assert closed.is_set()
+    expected = [(("strategy-a",), {})] if mode == "params" else [((), {"trader_id": None, "strategy_id": "strategy-a"})]
+    assert calls == expected
+
+
+@pytest.mark.asyncio
+async def test_interval_gate_and_round_robin(scheduler):
+    task = asyncio.create_task(worker.start_loop())
+    try:
+        await _until(lambda: len(scheduler.snapshots) >= 4)
+        assert scheduler.run.await_args_list[0].args == ("strategy-a", "params")
+        assert scheduler.run.await_count == 1
+        scheduler.now += timedelta(seconds=61)
+        await _until(lambda: scheduler.run.await_count == 2)
+        assert scheduler.run.await_args_list[1].args == ("strategy-b", "params")
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_disabled_schedule_writes_snapshot_without_initializing_ai(scheduler):
+    scheduler.settings["interval_seconds"] = 0
+    task = asyncio.create_task(worker.start_loop())
+    try:
+        await _until(lambda: len(scheduler.snapshots) >= 2)
+        scheduler.run.assert_not_awaited()
+        scheduler.manager.initialize.assert_not_awaited()
+        assert scheduler.snapshots[-1]["current_activity"] == "Scheduled research disabled"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control_key", ["is_paused", "is_enabled"])
+async def test_control_changes_cancel_work_and_preserve_heartbeats(scheduler, monkeypatch, control_key):
+    cancelled = asyncio.Event()
+
+    async def blocked(*_args):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(worker, "_run_experiment", blocked)
+    task = asyncio.create_task(worker.start_loop())
+    try:
+        await _until(lambda: len(scheduler.snapshots) >= 3)
+        assert all(snapshot["stats"]["experiment_active"] for snapshot in scheduler.snapshots)
+        scheduler.control[control_key] = control_key == "is_paused"
+        await asyncio.wait_for(cancelled.wait(), 2)
+        await _until(lambda: not scheduler.snapshots[-1]["stats"]["experiment_active"])
+        assert scheduler.snapshots[-1]["running"] is False
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_unavailable_ai_is_retried_until_ready(scheduler):
+    scheduler.available = False
+
+    async def initialize():
+        if scheduler.manager.initialize.await_count >= 2:
+            scheduler.available = True
         return True
 
-
-@pytest.fixture()
-def fake_ai(monkeypatch):
-    async def _init():
-        return _FakeLLMManager()
-
-    import services.ai as ai_pkg
-
-    monkeypatch.setattr(ai_pkg, "initialize_ai", _init)
-
-
-@pytest.mark.asyncio
-async def test_run_experiment_consumes_stream_and_returns_terminal_event(
-    monkeypatch, fake_ai
-):
-    events = [
-        {"event": "experiment_start", "data": {}},
-        {"event": "iteration_start", "data": {}},
-        {"event": "done", "data": {"best_score": 1.5}},
-    ]
-
-    async def _fake_stream(strategy_id, settings_override=None):
-        for e in events:
-            yield e
-
-    from services.autoresearch_service import autoresearch_service
-
-    monkeypatch.setattr(
-        autoresearch_service, "run_strategy_params_stream", _fake_stream
-    )
-
-    async def _fake_settings():
-        return {"mode": "params", "interval_seconds": 60}
-
-    monkeypatch.setattr(worker, "_load_settings", _fake_settings)
-
-    final = await worker._run_experiment("strategy-1")
-    assert final == "done"
+    scheduler.manager.initialize.side_effect = initialize
+    task = asyncio.create_task(worker.start_loop())
+    try:
+        await _until(lambda: scheduler.run.await_count == 1)
+        assert scheduler.manager.initialize.await_count == 2
+        assert any(snapshot["current_activity"] == "Waiting for AI configuration" for snapshot in scheduler.snapshots)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_run_experiment_routes_code_mode_without_trader(monkeypatch, fake_ai):
-    calls: dict = {}
-
-    async def _fake_code_stream(trader_id, strategy_id, settings_override=None):
-        calls["trader_id"] = trader_id
-        calls["strategy_id"] = strategy_id
-        yield {"event": "done", "data": {}}
-
-    from services.autoresearch_service import autoresearch_service
-
-    monkeypatch.setattr(
-        autoresearch_service, "run_code_evolution_stream", _fake_code_stream
-    )
-
-    async def _fake_settings():
-        return {"mode": "code", "interval_seconds": 60}
-
-    monkeypatch.setattr(worker, "_load_settings", _fake_settings)
-
-    final = await worker._run_experiment("strategy-2")
-    assert final == "done"
-    assert calls["trader_id"] is None
-    assert calls["strategy_id"] == "strategy-2"
+async def test_transient_ai_initialization_failure_recovers(scheduler):
+    scheduler.manager.initialize.side_effect = [RuntimeError("temporary settings read failure"), True]
+    task = asyncio.create_task(worker.start_loop())
+    try:
+        await _until(lambda: scheduler.run.await_count == 1)
+        assert scheduler.manager.initialize.await_count == 2
+        assert scheduler.snapshots[-1]["last_error"] is None
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_start_loop_gate_interval_and_round_robin(monkeypatch, fake_ai):
-    monkeypatch.setattr(worker, "_POLL_SECONDS", 0.01)
+async def test_ai_configuration_refreshes_during_schedule_wait(scheduler):
+    task = asyncio.create_task(worker.start_loop())
+    try:
+        await _until(lambda: len(scheduler.snapshots) >= 3)
+        assert scheduler.run.await_count == 1
+        scheduler.revision += timedelta(seconds=1)
+        await _until(lambda: scheduler.manager.initialize.await_count == 2)
+        assert scheduler.run.await_count == 1
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
-    async def _fake_settings():
-        return {"mode": "params", "interval_seconds": 60}
 
-    monkeypatch.setattr(worker, "_load_settings", _fake_settings)
+@pytest.mark.asyncio
+async def test_ai_configuration_refresh_waits_until_active_experiment_finishes(scheduler):
+    finished = asyncio.Event()
 
-    strategies = ["alpha", "beta"]
-    monkeypatch.setattr(worker, "_enabled_strategy_ids", lambda: _list())
-
-    async def _list():
-        return list(strategies)
-
-    ran: list[str] = []
-
-    async def _fake_run(strategy_id):
-        ran.append(strategy_id)
+    async def run(*_args):
+        await finished.wait()
         return "done"
 
-    monkeypatch.setattr(worker, "_run_experiment", _fake_run)
-
-    async def _not_busy(_strategy_id):
-        return False
-
-    monkeypatch.setattr(worker, "_has_running_experiment_elsewhere", _not_busy)
-
+    scheduler.run.side_effect = run
     task = asyncio.create_task(worker.start_loop())
-    # Poll is 0.01s; the 60s interval must block the second experiment.
-    await asyncio.sleep(0.3)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await _until(lambda: scheduler.run.await_count == 1)
+        assert scheduler.manager.initialize.await_count == 1
+        scheduler.revision += timedelta(seconds=1)
+        snapshot_count = len(scheduler.snapshots)
+        await _until(lambda: len(scheduler.snapshots) >= snapshot_count + 2)
+        assert scheduler.manager.initialize.await_count == 1
+        assert scheduler.snapshots[-1]["stats"]["experiment_active"] is True
 
-    assert ran == ["alpha"], "interval gate must prevent back-to-back runs"
+        finished.set()
+        await _until(lambda: scheduler.manager.initialize.await_count == 2)
+        assert scheduler.run.await_count == 1
+        assert scheduler.snapshots[-1]["current_activity"] == "Waiting for next experiment"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_start_loop_disabled_interval_never_runs(monkeypatch, fake_ai):
-    monkeypatch.setattr(worker, "_POLL_SECONDS", 0.01)
-
-    async def _fake_settings():
-        return {"mode": "params", "interval_seconds": 0}
-
-    monkeypatch.setattr(worker, "_load_settings", _fake_settings)
-
-    async def _fake_run(strategy_id):
-        raise AssertionError("must not run when interval <= 0")
-
-    monkeypatch.setattr(worker, "_run_experiment", _fake_run)
-    monkeypatch.setattr(worker, "_enabled_strategy_ids", lambda: _empty())
-
-    async def _empty():
-        return ["alpha"]
-
+async def test_manual_run_request_works_with_scheduling_disabled(scheduler):
+    scheduler.settings["interval_seconds"] = 0
+    scheduler.control["requested_run_at"] = scheduler.now
     task = asyncio.create_task(worker.start_loop())
-    await asyncio.sleep(0.2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await _until(lambda: scheduler.run.await_count == 1)
+        worker.clear_worker_run_request.assert_awaited_once()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_has_running_experiment_elsewhere_freshness(monkeypatch, fake_ai):
-    from datetime import timedelta
-
-    def _make_session(updated_values):
-        class _Result:
-            def scalars(self):
-                class _S:
-                    def all(self):
-                        return list(updated_values)
-
-                return _S()
-
-        class _FakeSession:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-            async def execute(self, *_a, **_kw):
-                return _Result()
-
-        return _FakeSession
-
-    from utils.utcnow import utcnow
-
-    naive_fresh = utcnow().replace(tzinfo=None) - timedelta(minutes=5)
-    aware_fresh = utcnow() - timedelta(minutes=5)
-    stale = utcnow() - timedelta(hours=3)
-
-    cases = [
-        ([naive_fresh], True),
-        ([aware_fresh], True),
-        ([stale], False),
-        ([stale, aware_fresh], True),
-        ([None], False),
-        ([], False),
-    ]
-    for updated_values, expected in cases:
-        monkeypatch.setattr(
-            worker, "AsyncSessionLocal", _make_session(updated_values)
-        )
-        got = await worker._has_running_experiment_elsewhere("strategy-1")
-        assert got is expected, f"{updated_values!r} -> {got}, want {expected}"
-
-
-@pytest.mark.asyncio
-async def test_start_loop_skips_strategy_busy_elsewhere(monkeypatch, fake_ai):
-    monkeypatch.setattr(worker, "_POLL_SECONDS", 0.01)
-
-    async def _fake_settings():
-        return {"mode": "params", "interval_seconds": 60}
-
-    async def _busy_list():
-        return ["alpha", "beta"]
-
-    monkeypatch.setattr(worker, "_load_settings", _fake_settings)
-    monkeypatch.setattr(worker, "_enabled_strategy_ids", _busy_list)
-
-    async def _fake_busy(strategy_id):
-        return strategy_id == "alpha"
-
-    monkeypatch.setattr(worker, "_has_running_experiment_elsewhere", _fake_busy)
-
-    async def _fake_run(strategy_id):
-        raise AssertionError(f"must not run while busy elsewhere: {strategy_id}")
-
-    monkeypatch.setattr(worker, "_run_experiment", _fake_run)
-
+async def test_failed_configuration_refresh_with_available_old_provider_retries(scheduler):
+    scheduler.manager.initialize.side_effect = [False, True]
     task = asyncio.create_task(worker.start_loop())
-    await asyncio.sleep(0.3)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await _until(lambda: scheduler.run.await_count == 1)
+        assert scheduler.manager.initialize.await_count == 2
+        assert scheduler.snapshots[0]["current_activity"] == "Waiting for AI configuration"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

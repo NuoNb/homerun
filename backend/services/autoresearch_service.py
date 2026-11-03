@@ -18,10 +18,9 @@ import difflib
 import json
 import time
 import uuid
-from datetime import timezone
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator
 
-from sqlalchemy import desc, select, update
+from sqlalchemy import desc, select, text, update
 
 from models.database import (
     AppSettings,
@@ -34,6 +33,7 @@ from models.database import (
     Trader,
 )
 from services.ai.agent import Agent, AgentEventType, AgentTool, run_agent_to_completion
+from services.autoresearch_runtime import AutoresearchRun, claim_experiment, experiment_lock_keys
 from services.param_optimizer import (
     DEFAULT_PARAM_SPECS,
     BacktestResult,
@@ -49,26 +49,10 @@ from services.strategy_tune_agent import (
     _tool_get_trader_context,
 )
 from utils.logger import get_logger
+from utils.retry import run_with_db_retries
 from utils.utcnow import utcnow
 
 logger = get_logger(__name__)
-
-# A ``running`` experiment row whose ``updated_at`` is fresher than this is
-# considered owned by a live process elsewhere (see ``_resolve_runtime_status``).
-_ORPHAN_GRACE_SECONDS = 1800.0
-
-
-def _resolve_autoresearch_status(
-    experiment_id: str,
-    stored_status: str,
-    active_experiment_id: str | None,
-) -> str:
-    if active_experiment_id == experiment_id:
-        return "running"
-    if stored_status == "running":
-        return "failed"
-    return stored_status
-
 
 # ---------------------------------------------------------------------------
 # Composite scoring (matches param_optimizer formula)
@@ -140,15 +124,20 @@ async def save_autoresearch_settings(updates: dict[str, Any]) -> dict[str, Any]:
         "train_ratio": "autoresearch_train_ratio",
         "mode": "autoresearch_mode",
     }
-    async with AsyncSessionLocal() as session:
-        row = (await session.execute(select(AppSettings).where(AppSettings.id == "default"))).scalar_one_or_none()
-        if row is None:
-            return _defaults()
-        for key, value in updates.items():
-            col = col_map.get(key)
-            if col and value is not None:
-                setattr(row, col, value)
-        await session.commit()
+
+    async def persist_settings(_attempt: int) -> None:
+        async with AsyncSessionLocal() as session:
+            row = (await session.execute(select(AppSettings).where(AppSettings.id == "default"))).scalar_one_or_none()
+            if row is None:
+                row = AppSettings(id="default")
+                session.add(row)
+            for key, value in updates.items():
+                col = col_map.get(key)
+                if col and value is not None:
+                    setattr(row, col, value)
+            await session.commit()
+
+    await run_with_db_retries(persist_settings)
     return await load_autoresearch_settings()
 
 
@@ -519,67 +508,25 @@ If you believe no changes will improve the score, return:
 class AutoresearchService:
     """Manages autoresearch experiment lifecycle and loop execution."""
 
-    _instance: Optional["AutoresearchService"] = None
-    _active_experiments: dict[str, str]  # trader_id -> experiment_id
-
-    def __new__(cls) -> "AutoresearchService":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __init__(self) -> None:
-        if getattr(self, "_initialized", False):
-            return
-        self._initialized = True
-        self._active_experiments = {}
-        self._stop_flags: dict[str, asyncio.Event] = {}  # trader_id -> stop event
-        logger.info("AutoresearchService initialised")
-
-    async def _resolve_runtime_status(
-        self,
-        session,
-        row: AutoresearchExperiment,
-        session_key: str,
-    ) -> str:
-        active_experiment_id = self._active_experiments.get(session_key)
-        resolved_status = _resolve_autoresearch_status(
-            row.id,
-            row.status,
-            active_experiment_id,
-        )
-
-        if active_experiment_id is not None and active_experiment_id != row.id:
-            self._active_experiments.pop(session_key, None)
-            self._stop_flags.pop(session_key, None)
-
-        # Cross-process grace: ``_active_experiments`` is per-process, but a
-        # running row can be owned by another process (scheduled worker on the
-        # jobs plane, an API SSE session).  A live owner refreshes
-        # ``updated_at`` on every iteration, so a fresh row means "running
-        # elsewhere" — keep it running.  Only stale rows (crashed owner)
-        # fall through to the orphan-failed path.
-        if resolved_status == "failed":
-            updated = getattr(row, "updated_at", None)
-            if updated is not None:
-                if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
-                if (utcnow() - updated).total_seconds() < _ORPHAN_GRACE_SECONDS:
-                    return "running"
-
-        if resolved_status == row.status:
-            return resolved_status
-
+    async def _resolve_runtime_status(self, session, row: AutoresearchExperiment) -> str:
+        if row.status != "running":
+            return row.status
+        for key in experiment_lock_keys(row.trader_id, row.strategy_id):
+            available = await session.scalar(
+                text("SELECT pg_try_advisory_xact_lock(CAST(:key AS bigint))"), {"key": key}
+            )
+            if not available:
+                return "running"
+        await session.refresh(row)
+        if row.status != "running":
+            return row.status
         now = utcnow()
-        row.status = resolved_status
+        row.status = "failed"
         row.finished_at = row.finished_at or now
         row.updated_at = now
         await session.commit()
-        logger.warning(
-            "Marked orphaned autoresearch experiment failed",
-            experiment_id=row.id,
-            session_key=session_key,
-        )
-        return resolved_status
+        logger.warning("Marked orphaned autoresearch experiment failed", experiment_id=row.id)
+        return "failed"
 
     # ------------------------------------------------------------------
     # Status & history
@@ -598,7 +545,7 @@ class AutoresearchService:
             ).scalar_one_or_none()
 
             if row is not None:
-                resolved_status = await self._resolve_runtime_status(session, row, trader_id)
+                resolved_status = await self._resolve_runtime_status(session, row)
 
         if row is None:
             return {
@@ -719,32 +666,37 @@ class AutoresearchService:
     # ------------------------------------------------------------------
 
     async def stop_experiment(self, trader_id: str) -> dict[str, Any]:
-        """Signal a running experiment to stop."""
-        return await self._stop_session(trader_id)
+        return await self._stop_session(trader_id=trader_id)
 
-    async def _stop_session(self, session_key: str) -> dict[str, Any]:
-        """Stop the experiment registered under ``session_key``.
-
-        ``session_key`` is either a trader id (legacy bot-scoped path)
-        or ``strategy:<id>`` (new strategy-scoped path). Both forms
-        resolve to the same active-experiment + stop-flag dictionaries.
-        """
-        stop_event = self._stop_flags.get(session_key)
-        if stop_event:
-            stop_event.set()
-
-        exp_id = self._active_experiments.pop(session_key, None)
-        if exp_id:
-            async with AsyncSessionLocal() as session:
-                await session.execute(
-                    update(AutoresearchExperiment)
-                    .where(AutoresearchExperiment.id == exp_id)
-                    .values(status="paused", finished_at=utcnow(), updated_at=utcnow())
+    async def _stop_session(
+        self,
+        *,
+        trader_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any]:
+        async def persist_stop(_attempt: int) -> list[str]:
+            stmt = update(AutoresearchExperiment).where(AutoresearchExperiment.status == "running")
+            if trader_id is not None:
+                stmt = stmt.where(AutoresearchExperiment.trader_id == trader_id)
+            else:
+                stmt = stmt.where(
+                    AutoresearchExperiment.strategy_id == strategy_id,
+                    AutoresearchExperiment.trader_id.is_(None),
+                    AutoresearchExperiment.mode == mode,
                 )
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    stmt.values(status="paused", finished_at=utcnow(), updated_at=utcnow()).returning(
+                        AutoresearchExperiment.id
+                    )
+                )
+                ids = list(result.scalars().all())
                 await session.commit()
+                return ids
 
-        self._stop_flags.pop(session_key, None)
-        return {"stopped": True, "experiment_id": exp_id}
+        ids = await run_with_db_retries(persist_stop)
+        return {"stopped": bool(ids), "experiment_id": ids[0] if ids else None}
 
     # ── Strategy-scoped helpers ────────────────────────────────────────
     # These mirror the trader-scoped status/history/list/stop methods
@@ -754,7 +706,6 @@ class AutoresearchService:
 
     async def get_strategy_experiment_status(self, strategy_id: str) -> dict[str, Any]:
         """Get the latest experiment status for a strategy (code-only)."""
-        session_key = f"strategy:{strategy_id}"
         async with AsyncSessionLocal() as session:
             row = (
                 await session.execute(
@@ -769,7 +720,7 @@ class AutoresearchService:
             ).scalar_one_or_none()
 
             if row is not None:
-                resolved_status = await self._resolve_runtime_status(session, row, session_key)
+                resolved_status = await self._resolve_runtime_status(session, row)
 
         if row is None:
             return {
@@ -859,7 +810,7 @@ class AutoresearchService:
 
     async def stop_strategy_experiment(self, strategy_id: str) -> dict[str, Any]:
         """Stop the strategy-scoped code experiment, if any."""
-        return await self._stop_session(f"strategy:{strategy_id}")
+        return await self._stop_session(strategy_id=strategy_id, mode="code")
 
     # ------------------------------------------------------------------
     # Core autoresearch loop (async generator for SSE streaming)
@@ -870,34 +821,96 @@ class AutoresearchService:
         trader_id: str,
         settings_override: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Run the autoresearch loop, yielding progress events for SSE.
-
-        Each yield is a dict with 'event' and 'data' keys.
-        """
-        # Prevent duplicate experiments for the same trader
-        if trader_id in self._active_experiments:
-            yield {"event": "error", "data": {"error": "An experiment is already running for this trader"}}
-            return
-
-        # Load settings
         settings = await load_autoresearch_settings()
-        if settings_override:
-            for k, v in settings_override.items():
-                if v is not None and k in settings:
-                    settings[k] = v
-
-        mode = settings.get("mode", "params")
-
-        # Branch to code evolution if mode is "code"
-        if mode == "code":
-            strategy_id = (settings_override or {}).get("strategy_id")
+        settings.update({key: value for key, value in (settings_override or {}).items() if value is not None})
+        if settings["mode"] == "code":
+            strategy_id = settings.get("strategy_id")
             if not strategy_id:
                 yield {"event": "error", "data": {"error": "strategy_id is required for code evolution mode"}}
                 return
-            async for event in self.run_code_evolution_stream(trader_id, strategy_id, settings_override):
+            stream = self._run_owned_experiment(trader_id, strategy_id, "code", settings)
+        else:
+            stream = self._run_owned_experiment(trader_id, None, "params", settings)
+        try:
+            async for event in stream:
                 yield event
-            return
+        finally:
+            await stream.aclose()
 
+    async def run_code_evolution_stream(
+        self,
+        trader_id: str | None,
+        strategy_id: str,
+        settings_override: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        settings = await load_autoresearch_settings()
+        settings.update({key: value for key, value in (settings_override or {}).items() if value is not None})
+        stream = self._run_owned_experiment(trader_id, strategy_id, "code", settings)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
+
+    async def run_strategy_params_stream(
+        self,
+        strategy_id: str,
+        settings_override: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        settings = await load_autoresearch_settings()
+        settings.update({key: value for key, value in (settings_override or {}).items() if value is not None})
+        stream = self._run_owned_experiment(None, strategy_id, "strategy_params", settings)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
+
+    async def _run_owned_experiment(
+        self,
+        trader_id: str | None,
+        strategy_id: str | None,
+        mode: str,
+        settings: dict[str, Any],
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        async with AsyncSessionLocal() as session:
+            if trader_id is not None and await session.scalar(select(Trader.id).where(Trader.id == trader_id)) is None:
+                yield {"event": "error", "data": {"error": f"Trader '{trader_id}' not found"}}
+                return
+            if (
+                strategy_id is not None
+                and await session.scalar(select(Strategy.id).where(Strategy.id == strategy_id)) is None
+            ):
+                yield {"event": "error", "data": {"error": f"Strategy '{strategy_id}' not found"}}
+                return
+        async with claim_experiment(
+            trader_id=trader_id, strategy_id=strategy_id, mode=mode, settings=settings
+        ) as control:
+            if control is None:
+                yield {
+                    "event": "error",
+                    "data": {"error": "An experiment is already running for this trader or strategy"},
+                }
+                return
+            if mode == "code":
+                stream = self._run_code_evolution_stream(trader_id, strategy_id, control, settings)
+            elif mode == "strategy_params":
+                stream = self._run_strategy_params_stream(strategy_id, control, settings)
+            else:
+                stream = self._run_trader_params_stream(trader_id, control, settings)
+            events = control.consume(stream)
+            try:
+                async for event in events:
+                    yield event
+            finally:
+                await events.aclose()
+
+    async def _run_trader_params_stream(
+        self,
+        trader_id: str,
+        control: AutoresearchRun,
+        settings: dict[str, Any],
+    ) -> AsyncGenerator[dict[str, Any], None]:
         max_iterations = int(settings.get("max_iterations", 50))
         walk_forward = True
         n_windows = int(settings.get("walk_forward_windows", 5))
@@ -921,7 +934,7 @@ class AutoresearchService:
             return
 
         # Create experiment record
-        experiment_id = str(uuid.uuid4())
+        experiment_id = control.experiment_id
         now = utcnow()
         name = f"auto-{now.strftime('%Y%m%d-%H%M')}"
 
@@ -932,27 +945,23 @@ class AutoresearchService:
         )
 
         async with AsyncSessionLocal() as session:
-            session.add(AutoresearchExperiment(
-                id=experiment_id,
-                trader_id=trader_id,
-                name=name,
-                status="running",
-                baseline_score=baseline_score,
-                best_score=baseline_score,
-                best_params_json=current_params.to_dict(),
-                iteration_count=0,
-                kept_count=0,
-                reverted_count=0,
-                settings_json=settings,
-                started_at=now,
-                created_at=now,
-                updated_at=now,
-            ))
+            await session.execute(
+                update(AutoresearchExperiment)
+                .where(AutoresearchExperiment.id == experiment_id, AutoresearchExperiment.status == "running")
+                .values(
+                    name=name,
+                    baseline_score=baseline_score,
+                    best_score=baseline_score,
+                    best_params_json=current_params.to_dict(),
+                    iteration_count=0,
+                    kept_count=0,
+                    reverted_count=0,
+                    updated_at=now,
+                )
+            )
             await session.commit()
 
-        self._active_experiments[trader_id] = experiment_id
-        stop_event = asyncio.Event()
-        self._stop_flags[trader_id] = stop_event
+        stop_event = control.stop_requested
 
         yield {
             "event": "experiment_start",
@@ -1029,7 +1038,7 @@ class AutoresearchService:
 
                 except Exception as exc:
                     reasoning = f"LLM agent error: {exc}"
-                    logger.warning("Autoresearch iteration %d LLM error: %s", iteration_num, exc)
+                    logger.warning("Autoresearch iteration LLM error", iteration=iteration_num, exc_info=exc)
 
                 yield {
                     "event": "proposal",
@@ -1096,9 +1105,11 @@ class AutoresearchService:
                                             }
                                             for cfg in source_configs
                                         ]
-                                        await _apply_tuned_param_updates(trader_id=trader_id, updates=updates)
+                                        async with AsyncSessionLocal() as apply_session:
+                                            if await control.lock_for_apply(apply_session):
+                                                await _apply_tuned_param_updates(trader_id=trader_id, updates=updates)
                                 except Exception as exc:
-                                    logger.warning("Failed to auto-apply params: %s", exc)
+                                    logger.warning("Failed to auto-apply params", trader_id=trader_id, exc_info=exc)
                         else:
                             reverted_count += 1
                     else:
@@ -1164,25 +1175,8 @@ class AutoresearchService:
                 await asyncio.sleep(1)
 
         except Exception as exc:
-            logger.exception("Autoresearch loop error: %s", exc)
+            logger.error("Autoresearch loop error", trader_id=trader_id, exc_info=exc)
             yield {"event": "error", "data": {"error": str(exc)}}
-        finally:
-            # Mark experiment as completed
-            final_status = "paused" if stop_event.is_set() else "completed"
-            async with AsyncSessionLocal() as session:
-                await session.execute(
-                    update(AutoresearchExperiment)
-                    .where(AutoresearchExperiment.id == experiment_id)
-                    .values(
-                        status=final_status,
-                        finished_at=utcnow(),
-                        updated_at=utcnow(),
-                    )
-                )
-                await session.commit()
-
-            self._active_experiments.pop(trader_id, None)
-            self._stop_flags.pop(trader_id, None)
 
         yield {
             "event": "done",
@@ -1214,6 +1208,8 @@ class AutoresearchService:
                 stmt = stmt.where(AutoresearchExperiment.trader_id == trader_id)
 
             rows = (await session.execute(stmt)).scalars().all()
+            for row in rows:
+                await self._resolve_runtime_status(session, row)
 
         results = []
         for r in rows:
@@ -1232,7 +1228,7 @@ class AutoresearchService:
                 "experiment_id": r.id,
                 "trader_id": r.trader_id,
                 "name": r.name,
-                "status": "running" if r.trader_id in self._active_experiments else r.status,
+                "status": r.status,
                 "mode": getattr(r, "mode", "params") or "params",
                 "strategy_id": getattr(r, "strategy_id", None),
                 "best_version": getattr(r, "best_version", None),
@@ -1259,40 +1255,17 @@ class AutoresearchService:
     # Code evolution loop
     # ------------------------------------------------------------------
 
-    async def run_code_evolution_stream(
+    async def _run_code_evolution_stream(
         self,
         trader_id: str | None,
         strategy_id: str,
-        settings_override: dict[str, Any] | None = None,
+        control: AutoresearchRun,
+        settings: dict[str, Any],
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Run strategy code evolution loop, yielding SSE events.
-
-        ``trader_id`` is optional. When omitted, the experiment is
-        strategy-scoped — it operates purely on the backtest data plane
-        and the active-experiments lock is keyed by ``strategy:<id>``
-        instead of the trader id. Trader-scoped runs preserve legacy
-        behavior so the existing per-bot Tune flows are unaffected.
-        """
         from services.backtest.unified_runner import run_unified_backtest
         from services.strategy_loader import validate_strategy_source, ALLOWED_IMPORT_PREFIXES
         from services.strategy_versioning import create_strategy_version_snapshot
         from services.strategy_runtime import bump_strategy_runtime_revisions
-
-        # Session key — either the trader id (legacy) or a strategy
-        # pseudo-key (new path). Used for the active-experiments and
-        # stop-flag dictionaries.
-        session_key = trader_id or f"strategy:{strategy_id}"
-
-        if session_key in self._active_experiments:
-            scope = "trader" if trader_id else "strategy"
-            yield {"event": "error", "data": {"error": f"An experiment is already running for this {scope}"}}
-            return
-
-        settings = await load_autoresearch_settings()
-        if settings_override:
-            for k, v in settings_override.items():
-                if v is not None and k in settings:
-                    settings[k] = v
 
         max_iterations = int(settings.get("max_iterations", 50))
         auto_apply = bool(settings.get("auto_apply", True))
@@ -1352,33 +1325,27 @@ class AutoresearchService:
             return
 
         # Create experiment
-        experiment_id = str(uuid.uuid4())
+        experiment_id = control.experiment_id
         now = utcnow()
         name = f"code-{strategy_slug}-{now.strftime('%Y%m%d-%H%M')}"
 
         async with AsyncSessionLocal() as session:
-            session.add(AutoresearchExperiment(
-                id=experiment_id,
-                trader_id=trader_id,
-                name=name,
-                status="running",
-                mode="code",
-                strategy_id=strategy_id,
-                baseline_score=baseline_score,
-                best_score=baseline_score,
-                best_source_code=strategy_source,
-                best_version=baseline_version_num,
-                iteration_count=0,
-                settings_json=settings,
-                started_at=now,
-                created_at=now,
-                updated_at=now,
-            ))
+            await session.execute(
+                update(AutoresearchExperiment)
+                .where(AutoresearchExperiment.id == experiment_id, AutoresearchExperiment.status == "running")
+                .values(
+                    name=name,
+                    baseline_score=baseline_score,
+                    best_score=baseline_score,
+                    best_source_code=strategy_source,
+                    best_version=baseline_version_num,
+                    iteration_count=0,
+                    updated_at=now,
+                )
+            )
             await session.commit()
 
-        self._active_experiments[session_key] = experiment_id
-        stop_event = asyncio.Event()
-        self._stop_flags[session_key] = stop_event
+        stop_event = control.stop_requested
 
         yield {
             "event": "experiment_start",
@@ -1486,7 +1453,7 @@ class AutoresearchService:
 
                 except Exception as exc:
                     reasoning = f"LLM agent error: {exc}"
-                    logger.warning("Code evolution iteration %d error: %s", iteration_num, exc)
+                    logger.warning("Code evolution iteration error", iteration=iteration_num, exc_info=exc)
 
                 yield {
                     "event": "proposal",
@@ -1575,25 +1542,27 @@ class AutoresearchService:
                                     new_version_num = baseline_version_num
                                     if auto_apply:
                                         try:
+                                            applied = False
                                             async with AsyncSessionLocal() as session:
-                                                strat = await session.get(Strategy, strategy_id)
-                                                if strat:
-                                                    strat.source_code = proposed_source
-                                                    version_snapshot = await create_strategy_version_snapshot(
-                                                        session,
-                                                        strategy=strat,
-                                                        reason="autoresearch_code_evolution",
-                                                        created_by="autoresearch",
-                                                        parent_version=best_version_num,
-                                                        commit=True,
-                                                    )
-                                                    new_version_num = version_snapshot.version
-                                                    best_version_num = new_version_num
-                                            await bump_strategy_runtime_revisions(
-                                                source_key=strategy_source_key
-                                            )
+                                                if await control.lock_for_apply(session):
+                                                    strat = await session.get(Strategy, strategy_id)
+                                                    if strat:
+                                                        strat.source_code = proposed_source
+                                                        version_snapshot = await create_strategy_version_snapshot(
+                                                            session,
+                                                            strategy=strat,
+                                                            reason="autoresearch_code_evolution",
+                                                            created_by="autoresearch",
+                                                            parent_version=best_version_num,
+                                                            commit=True,
+                                                        )
+                                                        new_version_num = version_snapshot.version
+                                                        best_version_num = new_version_num
+                                                        applied = True
+                                            if applied:
+                                                await bump_strategy_runtime_revisions(source_key=strategy_source_key)
                                         except Exception as exc:
-                                            logger.warning("Failed to create strategy version: %s", exc)
+                                            logger.warning("Failed to create strategy version", strategy_id=strategy_id, exc_info=exc)
                                 else:
                                     reverted_count += 1
 
@@ -1668,19 +1637,8 @@ class AutoresearchService:
                 await asyncio.sleep(1)
 
         except Exception as exc:
-            logger.exception("Code evolution loop error: %s", exc)
+            logger.error("Code evolution loop error", strategy_id=strategy_id, exc_info=exc)
             yield {"event": "error", "data": {"error": str(exc)}}
-        finally:
-            final_status = "paused" if stop_event.is_set() else "completed"
-            async with AsyncSessionLocal() as session:
-                await session.execute(
-                    update(AutoresearchExperiment)
-                    .where(AutoresearchExperiment.id == experiment_id)
-                    .values(status=final_status, finished_at=utcnow(), updated_at=utcnow())
-                )
-                await session.commit()
-            self._active_experiments.pop(session_key, None)
-            self._stop_flags.pop(session_key, None)
 
         yield {
             "event": "done",
@@ -1709,59 +1667,13 @@ class AutoresearchService:
     # of source-code patches.
     # ------------------------------------------------------------------
 
-    async def run_strategy_params_stream(
+    async def _run_strategy_params_stream(
         self,
         strategy_id: str,
-        settings_override: dict[str, Any] | None = None,
+        control: AutoresearchRun,
+        settings: dict[str, Any],
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Iterate the strategy's declared params via the unified backtest.
-
-        Parallel structure to ``run_code_evolution_stream`` so the two
-        loops share their evaluator surface — this one mutates
-        ``Strategy.config`` instead of ``Strategy.source_code``.
-
-        Each iteration:
-          1. Builds the bounded ``param_specs`` from the strategy's
-             ``config_schema.param_fields`` (the same schema the
-             BacktestStudio dynamic-params panel renders).
-          2. Asks the LLM agent for a JSON proposal of override
-             values; clamps each value to its declared bounds + type.
-          3. Runs ``run_unified_backtest`` with the merged config and
-             augments the result with a 3-fold walk-forward gate.
-          4. Scores the run via ``_code_evolution_score`` (Sharpe ×
-             DSR × WF stability − DD penalty) so an iteration that
-             pumps in-sample but fails out-of-sample gets crushed.
-          5. Keeps if ``new_score > best_score``; persists the merged
-             config back to the Strategy row when ``auto_apply``.
-
-        Stop conditions (settings_override):
-          - ``max_iterations`` (default 50)
-          - ``target_score`` — exits early once best_score >= target
-          - ``max_no_improvement`` — exits after N consecutive
-            non-improving iterations (default 10)
-          - ``mandate`` — free-form text passed to the proposer
-        """
         from services.backtest.unified_runner import run_unified_backtest
-
-        # Lock key is distinct from the code-mode strategy: lock so a
-        # user can run params + code experiments concurrently if they
-        # really want, without the two stomping each other's stop flag.
-        session_key = f"params:{strategy_id}"
-        if session_key in self._active_experiments:
-            yield {"event": "error", "data": {"error": "A param experiment is already running for this strategy"}}
-            return
-
-        settings = await load_autoresearch_settings()
-        if settings_override:
-            for k, v in settings_override.items():
-                if v is None:
-                    continue
-                # Accept the canonical autoresearch knobs + the new
-                # stop-condition keys (``target_score``, ``max_no_
-                # improvement``).  Settings rows persist only the
-                # canonical keys; structured stop-conditions live on
-                # the experiment_id-keyed dict only.
-                settings[k] = v
 
         max_iterations = int(settings.get("max_iterations", 50))
         auto_apply = bool(settings.get("auto_apply", True))
@@ -1819,34 +1731,28 @@ class AutoresearchService:
             yield {"event": "error", "data": {"error": f"Baseline backtest failed: {exc}"}}
             return
 
-        experiment_id = str(uuid.uuid4())
+        experiment_id = control.experiment_id
         now = utcnow()
         name = f"params-{strategy_slug}-{now.strftime('%Y%m%d-%H%M')}"
 
         async with AsyncSessionLocal() as session:
-            session.add(AutoresearchExperiment(
-                id=experiment_id,
-                trader_id=None,
-                name=name,
-                status="running",
-                mode="strategy_params",
-                strategy_id=strategy_id,
-                baseline_score=baseline_score,
-                best_score=baseline_score,
-                best_params_json=strategy_config,
-                iteration_count=0,
-                kept_count=0,
-                reverted_count=0,
-                settings_json=settings,
-                started_at=now,
-                created_at=now,
-                updated_at=now,
-            ))
+            await session.execute(
+                update(AutoresearchExperiment)
+                .where(AutoresearchExperiment.id == experiment_id, AutoresearchExperiment.status == "running")
+                .values(
+                    name=name,
+                    baseline_score=baseline_score,
+                    best_score=baseline_score,
+                    best_params_json=strategy_config,
+                    iteration_count=0,
+                    kept_count=0,
+                    reverted_count=0,
+                    updated_at=now,
+                )
+            )
             await session.commit()
 
-        self._active_experiments[session_key] = experiment_id
-        stop_event = asyncio.Event()
-        self._stop_flags[session_key] = stop_event
+        stop_event = control.stop_requested
 
         yield {
             "event": "experiment_start",
@@ -1947,7 +1853,7 @@ class AutoresearchService:
                         reasoning = f"Could not parse JSON from LLM response: {answer[:200]}"
                 except Exception as exc:
                     reasoning = f"LLM agent error: {exc}"
-                    logger.warning("Strategy params iteration %d LLM error: %s", iteration_num, exc)
+                    logger.warning("Strategy params iteration LLM error", iteration=iteration_num, exc_info=exc)
 
                 # Clamp the proposal against the schema.  Out-of-bounds
                 # entries get coerced or dropped — the LLM never sees
@@ -2008,14 +1914,15 @@ class AutoresearchService:
                             if auto_apply:
                                 try:
                                     async with AsyncSessionLocal() as session:
-                                        strat = await session.get(Strategy, strategy_id)
-                                        if strat is not None:
-                                            strat.config = dict(test_config)
-                                            await session.commit()
+                                        if await control.lock_for_apply(session):
+                                            strat = await session.get(Strategy, strategy_id)
+                                            if strat is not None:
+                                                strat.config = dict(test_config)
+                                                await session.commit()
                                 except Exception as exc:
                                     logger.warning(
-                                        "Failed to persist param overrides on strategy %s: %s",
-                                        strategy_id, exc,
+                                        "Failed to persist param overrides on strategy",
+                                        strategy_id=strategy_id, exc_info=exc,
                                     )
                         else:
                             reverted_count += 1
@@ -2086,19 +1993,8 @@ class AutoresearchService:
                 await asyncio.sleep(1)
 
         except Exception as exc:
-            logger.exception("Strategy params loop error: %s", exc)
+            logger.error("Strategy params loop error", strategy_id=strategy_id, exc_info=exc)
             yield {"event": "error", "data": {"error": str(exc)}}
-        finally:
-            final_status = "paused" if stop_event.is_set() else "completed"
-            async with AsyncSessionLocal() as session:
-                await session.execute(
-                    update(AutoresearchExperiment)
-                    .where(AutoresearchExperiment.id == experiment_id)
-                    .values(status=final_status, finished_at=utcnow(), updated_at=utcnow())
-                )
-                await session.commit()
-            self._active_experiments.pop(session_key, None)
-            self._stop_flags.pop(session_key, None)
 
         yield {
             "event": "done",
@@ -2127,7 +2023,6 @@ class AutoresearchService:
 
     async def get_strategy_params_experiment_status(self, strategy_id: str) -> dict[str, Any]:
         """Latest strategy_params experiment status for a strategy."""
-        session_key = f"params:{strategy_id}"
         async with AsyncSessionLocal() as session:
             row = (
                 await session.execute(
@@ -2142,7 +2037,7 @@ class AutoresearchService:
             ).scalar_one_or_none()
 
             if row is not None:
-                resolved_status = await self._resolve_runtime_status(session, row, session_key)
+                resolved_status = await self._resolve_runtime_status(session, row)
 
         if row is None:
             return {
@@ -2230,7 +2125,7 @@ class AutoresearchService:
 
     async def stop_strategy_params_experiment(self, strategy_id: str) -> dict[str, Any]:
         """Stop the running strategy_params experiment, if any."""
-        return await self._stop_session(f"params:{strategy_id}")
+        return await self._stop_session(strategy_id=strategy_id, mode="strategy_params")
 
 
 # ---------------------------------------------------------------------------

@@ -2393,12 +2393,13 @@ class LLMManager:
         except ValueError:
             return None
 
-    async def initialize(self) -> None:
+    async def initialize(self) -> bool:
         """Load API keys from AppSettings database table and initialize providers.
 
         Queries the AppSettings table for configured API keys and creates
         the corresponding provider instances. Also loads the current month's
-        spend from the LLMUsageLog table.
+        spend from the LLMUsageLog table. Returns False on a configuration
+        read failure, retaining the previous providers when available.
         """
         # Keep a snapshot of the previous state so transient DB or runtime
         # failures during re-init do not disable AI unexpectedly.
@@ -2412,6 +2413,7 @@ class LLMManager:
         self._providers.clear()
         self._preferred_provider = None
 
+        configuration_loaded = True
         try:
             async with AsyncSessionLocal() as session:
                 result = await session.execute(select(AppSettings).where(AppSettings.id == "default"))
@@ -2420,7 +2422,7 @@ class LLMManager:
                 if app_settings is None:
                     logger.info("No AppSettings found, LLM providers not configured")
                     self._initialized = True
-                    return
+                    return True
 
                 # Initialize providers for each configured API key
                 openai_key = decrypt_secret(app_settings.openai_api_key)
@@ -2597,7 +2599,8 @@ class LLMManager:
                 self._monthly_spend = float(spend_result.scalar() or 0.0)
 
         except Exception as exc:
-            logger.error("Failed to initialize LLM providers: %s", exc)
+            configuration_loaded = False
+            logger.error("Failed to initialize LLM providers", exc_info=exc)
             # Preserve the previous known-good runtime state when available.
             if previous_providers:
                 self._providers = previous_providers
@@ -2616,6 +2619,7 @@ class LLMManager:
             self._monthly_spend,
             self._spend_limit,
         )
+        return configuration_loaded
 
     def detect_provider(self, model: str) -> LLMProvider:
         """Detect the LLM provider from a model name prefix.

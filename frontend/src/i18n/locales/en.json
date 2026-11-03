@@ -110,6 +110,7 @@
     "reconciliation": "Reconciliation",
     "redeemer": "Redeemer",
     "events": "Events",
+    "autoresearch": "Autoresearch",
     "workerHealth": "Worker health",
     "tradingVpn": "Trading VPN",
     "noTelemetry": "No telemetry received yet.",

@@ -1,48 +1,20 @@
-"""Worker loop that auto-triggers scheduled autoresearch experiments.
+"""Schedule autoresearch on the jobs plane with shared controls and heartbeats."""
 
-The ``autoresearch_interval_seconds`` AppSettings column is documented
-as the "auto-trigger interval" but nothing ever consumed it —
-experiments could only be started from the BacktestStudio UI or by an
-AI agent calling ``start_param_iteration``.  This worker closes that
-gap.  It lives on the jobs plane (each iteration is an LLM proposal +
-unified backtest — the same class of CPU/GIL load as backtest_worker,
-so it must stay off the trading plane), polls the hot-reloadable
-setting, and when the interval has elapsed runs one headless experiment
-for the next enabled strategy (round-robin cursor).  ``interval <= 0``
-disables scheduling entirely.
-
-One experiment at a time per process — same bounding rationale as
-backtest_worker.  Mode follows the global autoresearch ``mode``
-setting: "params" iterates ``Strategy.config`` (bounds-clamped,
-auto-applied on improvement), "code" evolves ``Strategy.source_code``
-with version snapshots + walk-forward gate.  Experiments, iterations,
-and auto-apply are persisted by autoresearch_service itself, so
-scheduled runs show up in the UI's experiment/fleet views like manual
-ones.
-"""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import select
 
-from models.database import AsyncSessionLocal, AutoresearchExperiment, Strategy
+from models.database import AppSettings, AsyncSessionLocal, Strategy
+from services.worker_state import clear_worker_run_request, read_worker_control, write_worker_snapshot
 from utils.logger import get_logger
 from utils.utcnow import utcnow
 
 logger = get_logger("workers.autoresearch")
 
 _POLL_SECONDS = 30.0
-# An experiment row counts as "running elsewhere" only while it stays
-# fresh.  The service's in-memory ``_active_experiments`` lock is
-# per-process — the API process (SSE/MCP/UI) can't see this worker's
-# lock and vice versa, so the shared DB row is the only cross-process
-# truth.  A crashed process leaves ``status='running'`` frozen; its
-# ``updated_at`` goes stale (every live iteration refreshes it) and the
-# row stops blocking.  Generous margin: a healthy experiment writes at
-# least every few minutes.
-_RUNNING_EXPERIMENT_FRESH_SECONDS = 3600.0
 
 
 async def _load_settings() -> dict:
@@ -54,139 +26,154 @@ async def _load_settings() -> dict:
 async def _enabled_strategy_ids() -> list[str]:
     async with AsyncSessionLocal() as session:
         rows = (
-            await session.execute(
-                select(Strategy.id).where(Strategy.enabled.is_(True)).order_by(Strategy.id.asc())
-            )
-        ).scalars().all()
+            (await session.execute(select(Strategy.id).where(Strategy.enabled.is_(True)).order_by(Strategy.id.asc())))
+            .scalars()
+            .all()
+        )
     return [str(row) for row in rows]
 
 
-async def _has_running_experiment_elsewhere(strategy_id: str) -> bool:
-    """Cross-process duplicate guard.
-
-    The service locks per strategy in memory only, so an experiment
-    started from the API (SSE endpoint, MCP tool, BacktestStudio) is
-    invisible to this worker process.  Concurrent experiments on the
-    same strategy double the LLM spend and race on auto-apply, so check
-    the shared experiment row before starting our own.
-    """
-    cutoff = utcnow().timestamp() - _RUNNING_EXPERIMENT_FRESH_SECONDS
-    async with AsyncSessionLocal() as session:
-        rows = (
-            await session.execute(
-                select(AutoresearchExperiment.updated_at).where(
-                    AutoresearchExperiment.strategy_id == strategy_id,
-                    AutoresearchExperiment.status == "running",
-                )
-            )
-        ).scalars().all()
-    for updated in rows:
-        if updated is None:
-            continue
-        if updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        if updated.timestamp() >= cutoff:
-            return True
-    return False
-
-
-async def _run_experiment(strategy_id: str) -> str:
-    """Consume one experiment stream headless; return the terminal event."""
+async def _run_experiment(strategy_id: str, mode: str) -> str:
     from services.autoresearch_service import autoresearch_service
 
-    settings = await _load_settings()
-    mode = str(settings.get("mode") or "params")
     if mode == "code":
-        stream = autoresearch_service.run_code_evolution_stream(
-            trader_id=None,
-            strategy_id=strategy_id,
-        )
+        stream = autoresearch_service.run_code_evolution_stream(trader_id=None, strategy_id=strategy_id)
     else:
         stream = autoresearch_service.run_strategy_params_stream(strategy_id)
-
     final_event = "done"
-    async for event_dict in stream:
-        event_type = str(event_dict.get("event") or "")
-        if event_type:
-            final_event = event_type
-        if event_type == "error":
-            data = event_dict.get("data") or {}
-            logger.warning(
-                "Autoresearch experiment errored",
-                strategy_id=strategy_id,
-                mode=mode,
-                error=data.get("error"),
-            )
+    try:
+        async for event_dict in stream:
+            event_type = str(event_dict.get("event") or "")
+            if event_type == "error":
+                final_event = "error"
+                logger.warning(
+                    "Autoresearch experiment errored",
+                    strategy_id=strategy_id,
+                    mode=mode,
+                    error=(event_dict.get("data") or {}).get("error"),
+                )
+            elif event_type == "done" and final_event != "error":
+                final_event = str((event_dict.get("data") or {}).get("status") or "done")
+    finally:
+        await stream.aclose()
     return final_event
 
 
 async def start_loop() -> None:
-    logger.info("Autoresearch worker starting (poll=%.0fs)", _POLL_SECONDS)
+    from services.ai import get_llm_manager, initialize_ai
 
-    # Autoresearch drives the LLM proposer — without AI the experiments
-    # fail immediately with "AI subsystem not initialized".  Mirrors the
-    # reverse-engineer / news worker init pattern; treat failure as
-    # recoverable (next poll tick retries).
-    try:
-        from services.ai import initialize_ai
-
-        llm_manager = await initialize_ai()
-        logger.info(
-            "AI initialized in autoresearch worker (available=%s)",
-            llm_manager.is_available(),
-        )
-    except Exception:
-        logger.exception("AI init failed in autoresearch worker")
-
+    active_task: asyncio.Task | None = None
+    active_strategy_id: str | None = None
+    active_mode: str | None = None
     last_finished_at: datetime | None = None
+    last_run_at: datetime | None = None
+    ai_revision = None
+    previous_manager = None
+    last_error = None
+    final_event = None
     cursor = 0
-    while True:
-        await asyncio.sleep(_POLL_SECONDS)
-        try:
-            settings = await _load_settings()
-            interval = int(settings.get("interval_seconds") or 0)
-        except Exception:
-            logger.exception("Autoresearch worker: settings read failed")
-            continue
-        if interval <= 0:
-            continue
-        if last_finished_at is not None and (utcnow() - last_finished_at).total_seconds() < interval:
-            continue
+    try:
+        while True:
+            try:
+                if active_task is not None and active_task.done():
+                    try:
+                        final_event = active_task.result()
+                    except Exception as exc:
+                        final_event = "crashed"
+                        last_error = str(exc)
+                        logger.warning("Autoresearch experiment crashed", strategy_id=active_strategy_id, exc_info=exc)
+                    active_task = None
+                    active_strategy_id = None
+                    active_mode = None
+                    last_finished_at = utcnow()
 
-        try:
-            strategy_ids = await _enabled_strategy_ids()
-        except Exception:
-            logger.exception("Autoresearch worker: strategy list read failed")
-            continue
-        if not strategy_ids:
-            continue
+                settings = await _load_settings()
+                interval = int(settings["interval_seconds"])
+                async with AsyncSessionLocal() as session:
+                    control = await read_worker_control(session, "autoresearch", default_interval=600)
+                    revision = await session.scalar(select(AppSettings.updated_at).where(AppSettings.id == "default"))
 
-        strategy_id = strategy_ids[cursor % len(strategy_ids)]
-        cursor += 1
-        try:
-            if await _has_running_experiment_elsewhere(strategy_id):
-                logger.info(
-                    "Autoresearch worker: experiment already running elsewhere",
-                    strategy_id=strategy_id,
-                )
-                last_finished_at = utcnow()
-                continue
-        except Exception:
-            logger.exception(
-                "Autoresearch worker: duplicate-experiment check failed",
-                strategy_id=strategy_id,
-            )
-        started_at = utcnow()
-        try:
-            final_event = await _run_experiment(strategy_id)
-        except Exception:
-            logger.exception("Autoresearch worker: experiment crashed", strategy_id=strategy_id)
-            final_event = "crashed"
-        last_finished_at = utcnow()
-        logger.info(
-            "Autoresearch worker: experiment finished",
-            strategy_id=strategy_id,
-            final_event=final_event,
-            duration_seconds=round((utcnow() - started_at).total_seconds(), 1),
-            next_attempt_in_seconds=interval,
-        )
+                enabled = bool(control["is_enabled"])
+                paused = bool(control["is_paused"])
+                requested = control.get("requested_run_at") is not None
+                manager = None
+                ai_ready = False
+                if enabled and not paused and active_task is None and (interval > 0 or requested):
+                    try:
+                        manager = get_llm_manager()
+                    except RuntimeError:
+                        manager = await initialize_ai()
+                    ai_ready = True
+                    if manager is not previous_manager or revision != ai_revision or not manager.is_available():
+                        ai_ready = await manager.initialize()
+                        if ai_ready:
+                            previous_manager = manager
+                            ai_revision = revision
+
+                if not enabled or paused:
+                    if active_task is not None:
+                        active_task.cancel()
+                        await asyncio.gather(active_task, return_exceptions=True)
+                        active_task = None
+                        active_strategy_id = None
+                        active_mode = None
+                        last_finished_at = utcnow()
+                    activity = "Disabled" if not enabled else "Paused"
+                elif active_task is not None:
+                    activity = f"Researching {active_strategy_id} ({active_mode})"
+                elif interval <= 0 and not requested:
+                    activity = "Scheduled research disabled"
+                elif (
+                    not requested
+                    and last_finished_at is not None
+                    and (utcnow() - last_finished_at).total_seconds() < interval
+                ):
+                    activity = "Waiting for next experiment"
+                else:
+                    if not ai_ready or not manager.is_available():
+                        activity = "Waiting for AI configuration"
+                        last_error = "AI configuration unavailable"
+                    else:
+                        strategy_ids = await _enabled_strategy_ids()
+                        if strategy_ids:
+                            active_strategy_id = strategy_ids[cursor % len(strategy_ids)]
+                            cursor += 1
+                            active_mode = str(settings["mode"])
+                            active_task = asyncio.create_task(_run_experiment(active_strategy_id, active_mode))
+                            last_run_at = utcnow()
+                            last_error = None
+                            activity = f"Researching {active_strategy_id} ({active_mode})"
+                            if requested:
+                                async with AsyncSessionLocal() as session:
+                                    await clear_worker_run_request(session, "autoresearch")
+                        else:
+                            activity = "No enabled strategies"
+
+                async with AsyncSessionLocal() as session:
+                    await write_worker_snapshot(
+                        session,
+                        "autoresearch",
+                        running=enabled and not paused and (interval > 0 or active_task is not None),
+                        enabled=enabled,
+                        current_activity=activity,
+                        interval_seconds=int(_POLL_SECONDS),
+                        last_run_at=last_run_at,
+                        last_error=last_error,
+                        stats={
+                            "strategy_id": active_strategy_id,
+                            "mode": active_mode,
+                            "experiment_active": active_task is not None,
+                            "schedule_interval_seconds": interval,
+                            "final_event": final_event,
+                        },
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning("Autoresearch scheduler tick failed", exc_info=exc)
+            await asyncio.sleep(_POLL_SECONDS)
+    finally:
+        if active_task is not None:
+            active_task.cancel()
+            await asyncio.gather(active_task, return_exceptions=True)
