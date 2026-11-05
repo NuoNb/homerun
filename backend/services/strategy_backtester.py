@@ -249,7 +249,7 @@ async def _run_detect_once(
             except Exception:  # noqa: BLE001
                 pass
         token = _utcnow_mod.set_replay_clock_us(int(now_us))
-    books_token = _sdk_mod.set_replay_books(books)
+    books_token = _sdk_mod.set_replay_books({} if now_us is not None and books is None else books)
     try:
         if _has_custom_detect_async(strategy):
             return await asyncio.wait_for(
@@ -318,7 +318,7 @@ async def _run_on_event_once(
             except Exception:  # noqa: BLE001
                 pass
         token = _utcnow_mod.set_replay_clock_us(int(now_us))
-    books_token = _sdk_mod.set_replay_books(books)
+    books_token = _sdk_mod.set_replay_books({} if now_us is not None and books is None else books)
     try:
         out: list[Any] = []
         for ev in events or []:

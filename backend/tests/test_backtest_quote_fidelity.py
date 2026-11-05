@@ -437,3 +437,73 @@ def test_signal_evaluation_uses_emission_time_for_remaining_resolution_window() 
     assert received == pytest.approx([30], abs=0.5)
     assert underlying.payload_json is payload
     assert payload["resolution_date"] == (T0 + timedelta(seconds=60)).isoformat()
+
+
+@pytest.mark.parametrize(
+    "books",
+    [
+        {},
+        {"token": {}},
+        {"token": {"best_bid": 0.49, "bids": ((0.49, 2),)}},
+        {"token": {"best_ask": 0.5, "asks": ((0.5, 2),)}},
+    ],
+)
+def test_replay_prices_never_fall_back_to_catalog_or_live_runtime(
+    monkeypatch: pytest.MonkeyPatch, books: dict[str, dict[str, Any]]
+) -> None:
+    from unittest.mock import Mock
+    from services import market_runtime
+
+    runtime = Mock(side_effect=AssertionError("live runtime must not be read in replay"))
+    monkeypatch.setattr(market_runtime, "get_market_runtime", runtime)
+    market = SimpleNamespace(clob_token_ids=["token"], outcome_prices=[0.9], yes_price=0.9)
+    prior = strategy_sdk.set_replay_books(books)
+    try:
+        assert StrategySDK.get_live_price(market, {"token": {"mid": 0.9}}) == 0.0
+        assert StrategySDK.get_ws_mid_price("token") is None
+        assert StrategySDK.get_ws_spread_bps("token") is None
+        assert StrategySDK.get_ws_mid_price("missing") is None
+        expected_ask = float(books.get("token", {}).get("best_ask") or 0.0)
+        assert StrategySDK.get_ask_priced_fill(market, {}) == (expected_ask, 0.0, expected_ask > 0)
+        expected_bid = 0.49 if books.get("token", {}).get("best_bid") else 0.0
+        assert StrategySDK.get_bid_priced_exit(market, {}) == (expected_bid, 0.0, expected_bid > 0)
+        runtime.assert_not_called()
+    finally:
+        strategy_sdk.restore_replay_books(prior)
+
+
+def test_exit_sdk_price_helpers_and_resolution_time_use_historical_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+    from services import market_runtime
+
+    runtime = Mock(side_effect=AssertionError("live runtime must not be read in replay"))
+    monkeypatch.setattr(market_runtime, "get_market_runtime", runtime)
+    market = SimpleNamespace(clob_token_ids=["token"], outcome_prices=[0.9], end_date=T0 + timedelta(seconds=61))
+    values = []
+
+    class Strategy:
+        config = {}
+
+        def should_exit(self, position: SimpleNamespace, market_state: dict[str, Any]) -> ExitDecision:
+            values.append(
+                (
+                    StrategySDK.get_ws_mid_price("token"),
+                    StrategySDK.get_ws_spread_bps("token"),
+                    StrategySDK.get_live_price(market, {"token": {"mid": 0.9}}),
+                    StrategySDK.time_to_resolution(market),
+                    StrategySDK.time_to_resolution(market, now_ms=int(T0.timestamp() * 1000)),
+                    StrategySDK.get_ask_priced_fill(market, {}),
+                    StrategySDK.get_bid_priced_exit(market, {}),
+                )
+            )
+            return ExitDecision(action="hold", reason="historical context")
+
+    engine = BacktestEngine(strategy=Strategy())
+    position = Position(token_id="token", side="BUY", entry_price=0.5, size=2, opened_at=T0)
+    engine._call_should_exit(position, snapshot(1, [(0.49, 2)], [(0.5, 3)]))
+    mid, spread, price, remaining, explicit, buy, sell = values[0]
+    assert mid == price == pytest.approx(0.495)
+    assert spread == pytest.approx(0.01 / 0.495 * 10000)
+    assert remaining == 60 and explicit == 61
+    assert buy == (0.5, 0.495, True) and sell == (0.49, 0.495, True)
+    runtime.assert_not_called()

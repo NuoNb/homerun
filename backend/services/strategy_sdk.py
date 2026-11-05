@@ -93,7 +93,7 @@ def set_replay_books(books: Optional[dict[str, dict]]) -> Optional[dict[str, dic
     for restore (mirrors ``utils.utcnow.set_replay_clock_us``)."""
     global _replay_books
     prev = _replay_books
-    _replay_books = books if books else None
+    _replay_books = books
     return prev
 
 
@@ -2281,6 +2281,9 @@ class StrategySDK:
         Returns:
             The mid price as a float (0.0 if unavailable).
         """
+        if _replay_books is not None:
+            token_id = StrategySDK._resolve_token_id(market, side)
+            return StrategySDK.get_ws_mid_price(token_id) or 0.0
         idx = 0 if side.upper() == "YES" else 1
         fallback = 0.0
         if hasattr(market, "outcome_prices") and len(market.outcome_prices) > idx:
@@ -2374,6 +2377,12 @@ class StrategySDK:
             ``(fill_price, mid_price, ask_known)``. ``ask_known`` is True
             when the live ask was used (highest confidence in the fill cost).
         """
+        if _replay_books is not None:
+            token_id = StrategySDK._resolve_token_id(market, side)
+            state = _replay_books.get(token_id) or {}
+            _bid, ask = _replay_state_bid_ask(state)
+            mid = StrategySDK.get_ws_mid_price(token_id) or 0.0
+            return ask or 0.0, mid, ask is not None
         side_upper = side.upper()
         idx = 0 if side_upper == "YES" else 1
         token_ids = getattr(market, "clob_token_ids", None) or []
@@ -2421,6 +2430,12 @@ class StrategySDK:
         Use this when projecting the realized P&L of an exit, not the
         theoretical mid-priced one.
         """
+        if _replay_books is not None:
+            token_id = StrategySDK._resolve_token_id(market, side)
+            state = _replay_books.get(token_id) or {}
+            bid, _ask = _replay_state_bid_ask(state)
+            mid = StrategySDK.get_ws_mid_price(token_id) or 0.0
+            return bid or 0.0, mid, bid is not None
         side_upper = side.upper()
         idx = 0 if side_upper == "YES" else 1
         token_ids = getattr(market, "clob_token_ids", None) or []
@@ -2761,6 +2776,9 @@ class StrategySDK:
         Returns:
             Mid price or None if not fresh.
         """
+        if _replay_books is not None:
+            bid, ask = _replay_state_bid_ask(_replay_books.get(token_id) or {})
+            return (bid + ask) / 2.0 if bid is not None and ask is not None else None
         try:
             from services.market_runtime import get_market_runtime
 
@@ -2782,6 +2800,11 @@ class StrategySDK:
         Returns:
             Spread in bps or None.
         """
+        if _replay_books is not None:
+            bid, ask = _replay_state_bid_ask(_replay_books.get(token_id) or {})
+            if bid is None or ask is None:
+                return None
+            return (ask - bid) / ((bid + ask) / 2.0) * 10000.0
         try:
             from services.market_runtime import get_market_runtime
 
@@ -3409,7 +3432,7 @@ class StrategySDK:
                 ``.end_date``), a market dict (``end_date`` /
                 ``endDate`` / ``end_time``), an ISO datetime string,
                 a ``datetime``, or a raw epoch-millis int/float.
-            now_ms: Wall-clock millis. Defaults to ``time.time() * 1000``.
+            now_ms: Explicit clock millis. Defaults to replay time when installed, otherwise wall-clock time.
 
         Returns:
             Float seconds until resolution. Negative when the market
@@ -3419,7 +3442,10 @@ class StrategySDK:
         end_ms = StrategySDK._coerce_end_ts_ms(market_or_end_ts_ms)
         if end_ms is None:
             return None
-        now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
+        from utils.utcnow import replay_clock_us
+
+        replay_us = replay_clock_us()
+        now = int(now_ms) if now_ms is not None else (replay_us // 1000 if replay_us is not None else int(time.time() * 1000))
         return (end_ms - now) / 1000.0
 
     # ── Binary fair-value math ─────────────────────────────────

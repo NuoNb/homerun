@@ -204,12 +204,46 @@ async def test_scanner_projection_preserves_ladders_and_clears_empty_books() -> 
     try:
         depth = StrategySDK.get_order_book_depth(market, size_usd=2.8)
         assert depth["vwap_price"] == pytest.approx(2.8 / 5)
-        assert events[1].markets == []
+        from services.strategy_inputs import hydrate_market
+
+        first_market = hydrate_market(events[0].markets[0])
+        assert first_market.outcome_prices == [0.495, 0.0]
+        assert StrategySDK.get_live_price(first_market, events[0].prices, "YES") == pytest.approx(0.495)
+        assert StrategySDK.get_live_price(first_market, events[0].prices, "NO") == 0.0
+        empty_market = hydrate_market(events[1].markets[0])
+        assert empty_market.outcome_prices == [0.0, 0.0]
         assert events[1].prices["UP"]["asks"] == ()
         assert events[1].prices["DOWN"]["bids"] == ()
         strategy_sdk.set_replay_books(events[1].prices)
+        assert StrategySDK.get_live_price(first_market, events[0].prices, "YES") == 0.0
+        assert StrategySDK.get_live_price(first_market, events[0].prices, "NO") == 0.0
         assert StrategySDK.get_best_bid_ask(market) is None
         assert StrategySDK.get_order_book_depth(market) is None
     finally:
         strategy_sdk.restore_replay_books(old_books)
         clock.restore_replay_clock(old_clock)
+
+
+@pytest.mark.parametrize(
+    "quotes,expected",
+    [
+        ((0.49, 0.50, 0.30, 0.40), [0.495, 0.35]),
+        ((0.49, 0.50, None, None), [0.495, 0.0]),
+        ((None, None, 0.30, 0.40), [0.0, 0.35]),
+        ((None, 0.50, None, None), [0.0, 0.0]),
+        ((0.49, None, None, None), [0.0, 0.0]),
+        ((None, None, None, None), [0.0, 0.0]),
+    ],
+)
+def test_projected_catalog_hydrates_independent_prices_without_complements(
+    quotes: tuple[float | None, ...], expected: list[float]
+) -> None:
+    from services.marketdata.projection import _catalog_market_dict
+    from services.strategy_inputs import hydrate_market
+
+    tick = datetime(2026, 5, 28, 21, 0, tzinfo=timezone.utc)
+    row = _catalog_market_dict(_market(), tick=tick, up_bid=quotes[0], up_ask=quotes[1], down_bid=quotes[2], down_ask=quotes[3])
+    market = hydrate_market(row)
+    assert market.outcome_prices == expected
+    assert [token.price for token in market.tokens] == expected
+    assert market.end_date == datetime(2026, 5, 28, 21, 5, tzinfo=timezone.utc)

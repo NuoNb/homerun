@@ -269,31 +269,22 @@ def _catalog_market_dict(
     up_ask: Optional[float],
     down_bid: Optional[float],
     down_ask: Optional[float],
-) -> Optional[dict[str, Any]]:
-    """Build one MARKET_DATA_REFRESH catalog dict for a projected market.
+) -> dict[str, Any]:
+    """Build the canonical Market shape from independent recorded token books.
 
-    Shapes the dict the live polymarket catalog refresh publishes so a
-    scanner-tick strategy's ``detect()`` (which reads ``markets`` as
-    :class:`models.market.Market` objects + a per-token ``prices`` map) can't
-    tell imported-parquet replay from a live catalog snapshot.
-
-    Field name conventions matter:
-      * ``Market.from_gamma_response`` reads camelCase (``endDate``,
-        ``clobTokenIds``, ``bestBid``/``bestAsk``) — we emit those so the
-        model picks up the resolution date, tokens, and a top-of-book mid.
-      * The strategy's own text/price helpers read snake_case mirrors
-        (``end_time``, ``clob_token_ids``, ``best_bid``/``best_ask``,
-        ``category``) — we emit those too so both readers agree.
-
-    Returns ``None`` when neither side has a usable top-of-book (no point
-    surfacing a market the strategy can't price).
+    Empty books still emit the market with unavailable prices so carrying the
+    catalog across ticks cannot retain old quotes or infer binary complements.
     """
     derived = _derive_projected_prices(
         m, tick=tick, up_bid=up_bid, up_ask=up_ask, down_bid=down_bid, down_ask=down_ask
     )
     if derived is None:
-        return None
-    up_bid, up_ask, down_bid, down_ask, up_mid, down_mid, seconds_left, up_spread = derived
+        seconds_left = max(0, int((m.end_us - int(tick.timestamp() * 1_000_000)) / 1_000_000)) if m.end_us is not None else None
+        up_mid = down_mid = up_spread = None
+    else:
+        up_bid, up_ask, down_bid, down_ask, up_mid, down_mid, seconds_left, up_spread = derived
+    up_mid = up_mid if up_bid is not None and up_ask is not None else None
+    down_mid = down_mid if down_bid is not None and down_ask is not None else None
     end_iso = _iso_us(m.end_us)
     start_iso = _iso_us(m.start_us)
     category = _classify_projected_category(m)
@@ -303,33 +294,31 @@ def _catalog_market_dict(
         # ── identity ──
         "id": str(m.market_id or m.condition_id or m.slug or ""),
         "condition_id": m.condition_id or "",
-        "conditionId": m.condition_id or "",
         "slug": m.slug or "",
         "question": title,
-        "groupItemTitle": "",
         "event_slug": m.slug or "",
         # ── status gates the strategy checks first ──
         "closed": False,
+        "accepting_orders": True,
+        "enable_order_book": True,
         "active": True,
         "archived": False,
         "resolved": False,
-        "acceptingOrders": True,
-        "enableOrderBook": True,
-        # ── tokens (both camel + snake so every reader agrees) ──
-        "clobTokenIds": [m.up_token or "", m.down_token or ""],
+        # ── canonical tokens and independent recorded prices ──
         "clob_token_ids": [m.up_token or "", m.down_token or ""],
+        "outcome_prices": [up_mid or 0.0, down_mid or 0.0],
+        "tokens": [
+            {"token_id": m.up_token or "", "outcome": "Yes", "price": up_mid or 0.0},
+            {"token_id": m.down_token or "", "outcome": "No", "price": down_mid or 0.0},
+        ],
         "up_token_index": 0,
         "down_token_index": 1,
-        # ── resolution window (camelCase endDate → Market.end_date) ──
-        "endDate": end_iso,
+        # ── resolution window ──
         "end_date": end_iso,
         "end_time": end_iso,
         "start_time": start_iso,
         "seconds_left": seconds_left,
-        # ── pricing: bestBid/bestAsk feed Market.outcome_prices (YES mid);
-        #     the per-token grid augments these on each tick downstream ──
-        "bestBid": up_bid,
-        "bestAsk": up_ask,
+        # ── actual per-side quotes ──
         "best_bid": up_bid,
         "best_ask": up_ask,
         "spread": up_spread,
@@ -337,7 +326,6 @@ def _catalog_market_dict(
         "down_price": down_mid,
         # ── liquidity floor: clears scanner-tick hard gates ──
         "liquidity": DEFAULT_PROJECTED_LIQUIDITY,
-        "liquidityNum": DEFAULT_PROJECTED_LIQUIDITY,
         "volume": 0.0,
         # ── category / asset hints ──
         "asset": (m.coin or "").upper(),
@@ -430,8 +418,7 @@ async def project_market_data_refresh_events(
             down_bid = down_snap.bids[0].price if (down_snap and down_snap.bids) else None
             down_ask = down_snap.asks[0].price if (down_snap and down_snap.asks) else None
             md = _catalog_market_dict(m, tick=tick, up_bid=up_bid, up_ask=up_ask, down_bid=down_bid, down_ask=down_ask)
-            if md is not None:
-                market_dicts.append(md)
+            market_dicts.append(md)
             for token_id, snap in ((m.up_token, up_snap), (m.down_token, down_snap)):
                 if token_id:
                     prices_map[str(token_id)] = {
@@ -439,6 +426,7 @@ async def project_market_data_refresh_events(
                         "ask": snap.best_ask if snap else None,
                         "best_bid": snap.best_bid if snap else None,
                         "best_ask": snap.best_ask if snap else None,
+                        "mid": snap.mid if snap else None,
                         "bids": snap.levels("bid") if snap else (),
                         "asks": snap.levels("ask") if snap else (),
                         "observed_at": snap.observed_at if snap else None,

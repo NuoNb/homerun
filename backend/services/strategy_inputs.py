@@ -48,9 +48,9 @@ def hydrate_market(m: Any) -> Optional[Market]:
     API* shape (camelCase: ``endDate``, ``clobTokenIds`` …) and silently drops
     fields whose names don't match — notably ``end_date``, which scanner-tick
     strategies (e.g. tail_end_carry) read for days-to-resolution — so it must
-    only be used for genuine gamma payloads (incl. the marketdata projection,
-    which deliberately emits camelCase so from_gamma_response picks up the
-    date/tokens).  Route by shape; fall back to from_gamma_response when
+    only be used for genuine gamma payloads. Market-data projection emits
+    the canonical snake_case shape with independent recorded token prices.
+    Route by shape; fall back to from_gamma_response when
     model_validate can't produce a usable Market."""
     if not isinstance(m, dict):
         return None

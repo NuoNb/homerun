@@ -26,3 +26,12 @@ Use regression tests that fail on the original implementation; run relevant exis
 - All five frozen research fingerprints are unchanged. Autoresearch remains at interval_seconds=0 and auto_apply=false. No candidate backtests, holdout signal analysis, shadow trading or real orders were started by this repair.
 
 Detailed local evidence is retained under output/research/btc_eth_15m in native_repair_deployment_verified.json, native_repair_postgres_probe.json, native_repair_frozen_inputs_verified.json and round_001_native_contract_probe_after_repair.json.
+
+## Second-review correction (2026-11-05)
+
+The second independent review found two combined paths missing from the initial regression coverage: scanner catalogs could retain stale/synthetic prices through hydration and SDK fallback, and the WS-mid/resolution-time helpers could still read live state during replay. The initial 321 passing tests did not cover those combinations.
+
+- Scanner projections now use the canonical Market shape with independent recorded token prices. Empty books replace the same market's catalog prices with unavailable values; hydration does not derive the other token by complement.
+- Replay price, spread and bid/ask fill helpers read only installed historical books. Empty replay mappings remain isolated from live data; missing bid or ask is never synthesized. Both discovery dispatchers install an empty historical mapping when no books exist.
+- Resolution time uses explicit now when supplied, then the replay clock, then the existing live wall clock.
+- Five focused regressions failed against the previous deployed image. The repaired relevant suites, including input builders and crypto reconstruction, passed 341 tests. Additional permanent cases cover noncomplementary token prices, absent outcomes, bid-only, ask-only and entirely empty books. Both independent review findings were closed before remote publication.
