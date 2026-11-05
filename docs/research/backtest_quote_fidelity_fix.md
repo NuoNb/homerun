@@ -35,3 +35,12 @@ The second independent review found two combined paths missing from the initial 
 - Replay price, spread and bid/ask fill helpers read only installed historical books. Empty replay mappings remain isolated from live data; missing bid or ask is never synthesized. Both discovery dispatchers install an empty historical mapping when no books exist.
 - Resolution time uses explicit now when supplied, then the replay clock, then the existing live wall clock.
 - Five focused regressions failed against the previous deployed image. The repaired relevant suites, including input builders and crypto reconstruction, passed 341 tests. Additional permanent cases cover noncomplementary token prices, absent outcomes, bid-only, ask-only and entirely empty books. Both independent review findings were closed before remote publication.
+
+
+## Native execution smoke correction (2026-11-05)
+
+The first real development replay exposed a separate exit lifecycle defect: the engine submitted a complete exit again on each snapshot while earlier exits were pending venue admission. One bought position generated five full-size SELL fills, so that run is retained as invalid execution evidence and excluded from research results.
+
+The engine now tracks active exit children per token, held side and strategy. Pending, working and partial children prevent another exit batch until every child is terminal. A rejected or cancelled IOC remainder releases the position for a retry sized from its actual remaining holdings. Single-order and laddered paths use the same tracking.
+
+Three baseline regressions sold 100/200/400 shares against a 10-share position at 500/1000/2000 ms. The fix keeps the total at 10. Permanent cases also cover dense-snapshot laddered exits and partial IOC retries (10 shares close as 5 + 5). The focused engine, fidelity and settlement suites passed 80 tests. The frozen candidate, market inputs, fee model and holdout were unchanged.

@@ -187,8 +187,8 @@ class BacktestEngine:
         # as time advances.
         self._pending_intents: list[TradeIntent] = []
         self._intents_drained = 0
-        # Maps (position_key, child_id) → matching engine order_id.
-        self._exit_orders_by_position: dict[tuple, list[str]] = {}
+        # Active exit children keyed by (token_id, position side, strategy slug).
+        self._exit_orders_by_position: dict[tuple[str, str, Optional[str]], list[str]] = {}
         # Snapshot count for periodic progress logging.
         self._snapshots_processed = 0
         # Time-ordered (resolution_time, token_id) schedule driving the
@@ -484,6 +484,14 @@ class BacktestEngine:
             if key[0] == token_id and pos.size > 1e-12
         ]
         for key, pos in targets:
+            active_exit_ids = [
+                order_id
+                for order_id in self._exit_orders_by_position.pop(key, [])
+                if (order := self.matching.order(order_id)) is not None and not order.is_terminal
+            ]
+            if active_exit_ids:
+                self._exit_orders_by_position[key] = active_exit_ids
+                continue
             decision = self._call_should_exit(pos, snapshot)
             if decision is None:
                 continue
@@ -715,6 +723,9 @@ class BacktestEngine:
             meta={"role": role, "exit_for_position": position.side, **(child_meta or {})},
         )
         self.matching.submit(order)
+        if not order.is_terminal:
+            key = (position.token_id, position.side, position.strategy_slug)
+            self._exit_orders_by_position.setdefault(key, []).append(order.order_id)
 
     # ── Finalization ──────────────────────────────────────────────────
 

@@ -507,3 +507,76 @@ def test_exit_sdk_price_helpers_and_resolution_time_use_historical_context(monke
     assert remaining == 60 and explicit == 61
     assert buy == (0.5, 0.495, True) and sell == (0.49, 0.495, True)
     runtime.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("submit_ms", [500, 1000, 2000])
+@pytest.mark.parametrize("laddered", [False, True])
+async def test_pending_exits_never_sell_more_than_the_held_position(submit_ms: int, laddered: bool) -> None:
+    class Strategy:
+        def should_exit(self, position: SimpleNamespace, market_state: dict[str, Any]) -> ExitDecision:
+            if market_state["observed_at"] >= T0 + timedelta(seconds=3):
+                return ExitDecision(action="close", reason="close at bid", close_price=0.5)
+            return ExitDecision(action="hold", reason="before exit")
+
+        def resolve_exit_policy(self, decision: ExitDecision, close_trigger: str) -> Any:
+            if laddered:
+                return StrategySDK.build_ladder_exit_policy(
+                    levels=2, step_ticks=1, offset_ticks=1, chunk_size=5,
+                    distribution="equal", escalation_after_seconds=None,
+                )
+            return None
+
+    engine = BacktestEngine(
+        config=BacktestConfig(
+            latency=LatencyModel.deterministic(submit_ms=submit_ms, cancel_ms=submit_ms),
+            final_close_at_last_mid=False,
+        ),
+        strategy=Strategy(),
+    )
+    await engine.run(
+        book_source=InMemoryBookReplay([
+            snapshot(i / 20, [(0.5, 20)], [(0.6, 20)]) for i in range(161)
+        ]),
+        trade_intents=[TradeIntent(
+            intent_id="entry", emitted_at=T0, token_id="token",
+            side="BUY", size=10, limit_price=0.6, tif="IOC",
+        )],
+    )
+    sells = [fill for fill in engine.matching.all_fills() if fill.side == "SELL"]
+    assert sum(fill.size for fill in sells) == pytest.approx(10)
+    exits = [order for order in engine.matching.all_orders() if order.meta.get("role") in {"exit", "exit_child"}]
+    assert len(exits) == (2 if laddered else 1)
+    assert engine.portfolio.closed_position_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_ioc_exit_retries_only_the_remaining_position() -> None:
+    class Strategy:
+        def should_exit(self, position: SimpleNamespace, market_state: dict[str, Any]) -> ExitDecision:
+            if market_state["observed_at"] >= T0 + timedelta(seconds=1):
+                return ExitDecision(action="close", reason="close at bid", close_price=0.5)
+            return ExitDecision(action="hold", reason="before exit")
+
+    engine = BacktestEngine(
+        config=BacktestConfig(
+            latency=LatencyModel.deterministic(submit_ms=500, cancel_ms=500),
+            final_close_at_last_mid=False,
+        ),
+        strategy=Strategy(),
+    )
+    await engine.run(
+        book_source=InMemoryBookReplay([
+            snapshot(i / 20, [(0.5, 5)], [(0.6, 20)]) for i in range(61)
+        ]),
+        trade_intents=[TradeIntent(
+            intent_id="entry", emitted_at=T0, token_id="token",
+            side="BUY", size=10, limit_price=0.6, tif="IOC",
+        )],
+    )
+    exits = [order for order in engine.matching.all_orders() if order.meta.get("role") == "exit"]
+    assert [order.size for order in exits] == [10, 5]
+    assert [order.filled_size for order in exits] == [5, 5]
+    assert exits[1].submitted_at >= exits[0].venue_received_at
+    assert engine.portfolio.closed_position_count() == 1
+    assert engine.portfolio.open_position_count() == 0
