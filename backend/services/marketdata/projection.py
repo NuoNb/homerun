@@ -55,16 +55,6 @@ def _parse_iso_us(s: Any) -> Optional[int]:
     return int(dt.timestamp() * 1_000_000)
 
 
-def _clamp01(p: Any) -> Optional[float]:
-    if p is None:
-        return None
-    try:
-        p = float(p)
-    except (TypeError, ValueError):
-        return None
-    return p if 0.0 < p < 1.0 else None
-
-
 class ProjectedMarket:
     """Metadata for one importable market the projection can reconstruct."""
 
@@ -170,19 +160,12 @@ def _derive_projected_prices(
     down_bid: Optional[float],
     down_ask: Optional[float],
 ) -> Optional[tuple]:
-    """Shared book math for projected market dicts.  Fills a missing binary side
-    via the complement P(down)=1-P(up), computes up/down mids + seconds_left +
-    spread.  Returns ``None`` when neither side has a usable top-of-book, else
+    """Derive mids and time remaining from observed quotes only.
+
+    Missing sides stay missing. Returns ``None`` when neither side has a usable top-of-book, else
     ``(up_bid, up_ask, down_bid, down_ask, up_mid, down_mid, seconds_left,
     spread)``.  Both _market_dict (crypto_update shape) and _catalog_market_dict
     (MARKET_DATA_REFRESH shape) build their dicts on top of this."""
-    if up_bid is None and up_ask is None and (down_bid is not None or down_ask is not None):
-        up_bid = _clamp01(1.0 - down_ask) if down_ask is not None else None
-        up_ask = _clamp01(1.0 - down_bid) if down_bid is not None else None
-    if down_bid is None and down_ask is None and (up_bid is not None or up_ask is not None):
-        down_bid = _clamp01(1.0 - up_ask) if up_ask is not None else None
-        down_ask = _clamp01(1.0 - up_bid) if up_bid is not None else None
-
     def _mid(b: Optional[float], a: Optional[float]) -> Optional[float]:
         if b is not None and a is not None:
             return round((b + a) / 2.0, 6)
@@ -449,15 +432,19 @@ async def project_market_data_refresh_events(
             md = _catalog_market_dict(m, tick=tick, up_bid=up_bid, up_ask=up_ask, down_bid=down_bid, down_ask=down_ask)
             if md is not None:
                 market_dicts.append(md)
-                if m.up_token and (up_bid is not None or up_ask is not None):
-                    prices_map[str(m.up_token)] = {
-                        "bid": up_bid, "ask": up_ask, "best_bid": up_bid, "best_ask": up_ask,
+            for token_id, snap in ((m.up_token, up_snap), (m.down_token, down_snap)):
+                if token_id:
+                    prices_map[str(token_id)] = {
+                        "bid": snap.best_bid if snap else None,
+                        "ask": snap.best_ask if snap else None,
+                        "best_bid": snap.best_bid if snap else None,
+                        "best_ask": snap.best_ask if snap else None,
+                        "bids": snap.levels("bid") if snap else (),
+                        "asks": snap.levels("ask") if snap else (),
+                        "observed_at": snap.observed_at if snap else None,
+                        "is_fresh": snap is not None,
                     }
-                if m.down_token and (down_bid is not None or down_ask is not None):
-                    prices_map[str(m.down_token)] = {
-                        "bid": down_bid, "ask": down_ask, "best_bid": down_bid, "best_ask": down_ask,
-                    }
-        if market_dicts:
+        if prices_map:
             n_market_dicts += len(market_dicts)
             events.append(build_market_data_refresh_inputs(
                 source="marketdata.projection",

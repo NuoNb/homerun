@@ -26,9 +26,10 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from services.backtest.matching_engine import Fill, FeeModel
 
@@ -71,6 +72,8 @@ class Position:
     opened_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     fill_count: int = 0
+    signal_emitted_at: Optional[datetime] = None
+    strategy_context: dict[str, Any] = field(default_factory=dict)
 
     def apply_open_fill(self, fill: Fill) -> None:
         """Apply a fill that increases position size."""
@@ -249,7 +252,14 @@ class Portfolio:
 
     # ── Fill application ──────────────────────────────────────────────
 
-    def apply_fill(self, fill: Fill, *, strategy_slug: Optional[str]) -> None:
+    def apply_fill(
+        self,
+        fill: Fill,
+        *,
+        strategy_slug: Optional[str],
+        signal_emitted_at: Optional[datetime] = None,
+        strategy_context: Optional[dict[str, Any]] = None,
+    ) -> None:
         side_norm = (fill.side or "").upper()
         # Try to match against an opposing-side position first (closing).
         opposing_side = "SELL" if side_norm == "BUY" else "BUY"
@@ -285,6 +295,8 @@ class Portfolio:
                 token_id=fill.token_id,
                 side=side_norm,
                 strategy_slug=strategy_slug,
+                signal_emitted_at=signal_emitted_at,
+                strategy_context=deepcopy(strategy_context or {}),
             )
             self.positions[key] = pos
         pos.apply_open_fill(fill)

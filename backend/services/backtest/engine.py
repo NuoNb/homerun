@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from copy import deepcopy
+from types import SimpleNamespace
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional, Protocol, Sequence
@@ -175,7 +177,7 @@ class BacktestEngine:
         )
         # Snapshot of the "current best" book per token, used by the
         # exit-decision hook to feed market_state into should_exit().
-        self._latest_book: dict[str, BookSnapshot] = {}
+        self._latest_book: dict[str, dict[str, Any]] = {}
         # Order IDs we've already fired ``strategy.on_cancel`` for.
         # See _advance_one_snapshot step 6 — we scan once per tick for
         # newly-cancelled orders since the matching engine has multiple
@@ -294,6 +296,13 @@ class BacktestEngine:
     # ── Per-snapshot work ─────────────────────────────────────────────
 
     async def _on_snapshot(self, snapshot: BookSnapshot) -> None:
+        self._latest_book[snapshot.token_id] = {
+            "best_bid": snapshot.best_bid,
+            "best_ask": snapshot.best_ask,
+            "bids": snapshot.levels("bid"),
+            "asks": snapshot.levels("ask"),
+            "observed_at": snapshot.observed_at,
+        }
         # Redeem any position whose market has resolved at-or-before this
         # snapshot's time at $1/$0.  Runs BEFORE the fast-path bail and on
         # every snapshot (O(1) when nothing is due) because a resolved
@@ -329,9 +338,6 @@ class BacktestEngine:
             or has_active_orders
             or has_position_for_token
         ):
-            # Still mark the latest book per-token so future point-in-
-            # time queries (snapshot_at) work, but skip everything else.
-            self._latest_book[token_id] = snapshot
             return
 
         # 1. Drain any pending intents whose emit time has now passed.
@@ -352,7 +358,12 @@ class BacktestEngine:
             order = self.matching.order(fill.order_id)
             if order is None:
                 continue
-            self.portfolio.apply_fill(fill, strategy_slug=order.strategy_slug)
+            self.portfolio.apply_fill(
+                fill,
+                strategy_slug=order.strategy_slug,
+                signal_emitted_at=order.submitted_at,
+                strategy_context=order.meta.get("strategy_context"),
+            )
             # Fire strategy.on_fill / on_partial_fill notifications so
             # strategies that update internal state on fills (running
             # priors, calibration, etc.) see the same hook flow as
@@ -384,7 +395,6 @@ class BacktestEngine:
                     pass
 
         # 4. Mark portfolio at the new mid (if available).
-        self._latest_book[snapshot.token_id] = snapshot
         if snapshot.mid is not None:
             self.portfolio.mark(
                 token_id=snapshot.token_id,
@@ -504,9 +514,7 @@ class BacktestEngine:
         if self.strategy is None or not hasattr(self.strategy, "should_exit"):
             return None
         # Lightweight position view that mirrors what live trading passes.
-        class _BTPosView:
-            pass
-        view = _BTPosView()
+        view = SimpleNamespace()
         view.entry_price = pos.entry_price
         view.current_price = float(snapshot.mid) if snapshot.mid is not None else pos.entry_price
         view.highest_price = max(pos.entry_price, float(snapshot.mid or pos.entry_price))
@@ -526,8 +534,10 @@ class BacktestEngine:
             view.pnl_percent = 0.0
         view.filled_size = pos.size
         view.notional_usd = pos.size * pos.entry_price
-        view.strategy_context = pos and {} or {}
-        view.config = {}
+        view.opened_at = pos.opened_at
+        view.signal_emitted_at = pos.signal_emitted_at
+        view.strategy_context = deepcopy(pos.strategy_context)
+        view.config = deepcopy(getattr(self.strategy, "config", {}))
         view.outcome_idx = 0
 
         # Reflect real resolution state so hold-to-resolution strategies
@@ -548,14 +558,33 @@ class BacktestEngine:
             "is_resolved": resolved,
             "winning_outcome": settlement.winning_outcome if resolved else None,
             "token_id": pos.token_id,
+            "best_bid": snapshot.best_bid,
+            "best_ask": snapshot.best_ask,
+            "bids": snapshot.levels("bid"),
+            "asks": snapshot.levels("ask"),
+            "observed_at": snapshot.observed_at,
+            "signal_emitted_at": pos.signal_emitted_at,
         }
+        from services import strategy_sdk
+        from utils import utcnow as clock
+
+        now_us = int(snapshot.observed_at.timestamp() * 1_000_000)
+        previous_now = getattr(self.strategy, "_replay_now_us", None)
+        self.strategy._replay_now_us = now_us
+        clock_token = clock.set_replay_clock_us(now_us)
+        self._latest_book[pos.token_id] = market_state
+        books_token = strategy_sdk.set_replay_books(self._latest_book)
         try:
             return self.strategy.should_exit(view, market_state)
         except Exception as exc:
             logger.warning(
-                "strategy.should_exit raised in backtest: %s", exc, exc_info=exc
+                "strategy.should_exit raised in backtest", exc_info=exc
             )
             return None
+        finally:
+            strategy_sdk.restore_replay_books(books_token)
+            clock.restore_replay_clock(clock_token)
+            self.strategy._replay_now_us = previous_now
 
     def _submit_exit_for(
         self,

@@ -69,6 +69,7 @@ class UnifiedBacktestRequest(BaseModel):
     # higher-fidelity local capture).
     provider_dataset_ids: list[str] | None = None
     initial_capital_usd: float = Field(default=1000.0, gt=0.0)
+    # Equal positive p50/p95 values request an exact constant delay.
     submit_p50_ms: float | None = Field(default=None, ge=0.0)
     submit_p95_ms: float | None = Field(default=None, ge=0.0)
     cancel_p50_ms: float | None = Field(default=None, ge=0.0)

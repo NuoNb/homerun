@@ -13,6 +13,7 @@ import asyncio
 import itertools
 import time
 import traceback
+from bisect import bisect_left
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field, asdict
@@ -1853,7 +1854,7 @@ def _backtest_evaluate_opportunity(
             # it on the production wrapper so evaluate sees byte-
             # equivalent time semantics.
             try:
-                detected_at_orig = getattr(underlying, "created_at", None)
+                detected_at_orig = getattr(opp, "detected_at", None) or getattr(underlying, "created_at", None)
                 if isinstance(detected_at_orig, datetime):
                     if detected_at_orig.tzinfo is None:
                         detected_at_orig = detected_at_orig.replace(tzinfo=timezone.utc)
@@ -2348,17 +2349,21 @@ async def _load_opps_from_trade_signals(
     ``skipped`` would have failed evaluate or risk gates in live and
     would distort the backtest funnel by inflating ``opps_pulled``.
     """
-    from sqlalchemy import select as _select
+    from sqlalchemy import DateTime, cast, func, select as _select
     # The TradeSignal ORM model lives in models.database too.  Import
     # locally to avoid circular import at module load.
     from models.database import TradeSignal as _TS
     import json as _json
 
+    emitted_at = func.coalesce(
+        cast(func.nullif(_TS.payload_json["signal_emitted_at"].as_string(), ""), DateTime(timezone=True)),
+        func.timezone("UTC", _TS.created_at),
+    )
     stmt = (
         _select(_TS)
         .where(
-            _TS.created_at >= start_dt,
-            _TS.created_at <= end_dt,
+            emitted_at >= start_dt,
+            emitted_at < end_dt,
             _TS.strategy_type == slug,
             # Signals the live trader actually considered actionable.
             # ``expired`` is the dominant terminal status for many
@@ -2371,7 +2376,7 @@ async def _load_opps_from_trade_signals(
             # evaluate, skipped by deduplication).
             _TS.status.notin_(["filtered", "failed", "skipped"]),
         )
-        .order_by(_TS.created_at.asc())
+        .order_by(emitted_at.asc())
         .limit(max(1, int(max_rows)))
     )
     try:
@@ -2389,6 +2394,9 @@ async def _load_opps_from_trade_signals(
                 payload = {}
         if not isinstance(payload, dict):
             payload = {}
+        detected_at = _parse_iso_dt(payload.get("signal_emitted_at") or sig.created_at)
+        if detected_at is None or not start_dt <= detected_at < end_dt:
+            continue
         ptt = payload.get("positions_to_take") or []
         if not isinstance(ptt, list) or not ptt:
             # Reconstruct a minimal single-position from top-level
@@ -2429,7 +2437,7 @@ async def _load_opps_from_trade_signals(
             _SignalAsOpp(
                 sid=str(getattr(sig, "id", "") or ""),
                 strategy_type=str(getattr(sig, "strategy_type", "") or slug),
-                detected_at=sig.created_at,
+                detected_at=detected_at,
                 positions_data=positions_data,
                 expected_roi=float(getattr(sig, "edge_percent", 0.0) or 0.0),
                 title=str(payload.get("title") or ""),
@@ -3075,7 +3083,9 @@ async def _replay_bus_events_into_tick_grid(
             offset = (ev_ts - start_dt).total_seconds()
             if offset < 0:
                 continue
-            idx = min(n_ticks - 1, int(offset // max(actual_interval, 1e-9)))
+            idx = bisect_left(ticks, ev_ts)
+            if idx == n_ticks:
+                continue
             if envelope.topic == "polymarket.catalog.snapshot":
                 payload = getattr(envelope, "payload", None) or {}
                 for m in (payload.get("markets") or []):
@@ -3202,7 +3212,9 @@ async def _replay_bus_events_into_tick_grid(
                 offset = (ev.timestamp - start_dt).total_seconds()
                 if offset < 0:
                     continue
-                idx = min(n_ticks - 1, int(offset // max(actual_interval, 1e-9)))
+                idx = bisect_left(ticks, ev.timestamp)
+                if idx == n_ticks:
+                    continue
                 events_by_tick[idx].append(ev)
                 n_binned += 1
             if proj_stats.get("events"):
@@ -3246,7 +3258,9 @@ async def _replay_bus_events_into_tick_grid(
                 offset = (ev.timestamp - start_dt).total_seconds()
                 if offset < 0:
                     continue
-                idx = min(n_ticks - 1, int(offset // max(actual_interval, 1e-9)))
+                idx = bisect_left(ticks, ev.timestamp)
+                if idx == n_ticks:
+                    continue
                 events_by_tick[idx].append(ev)
                 n_binned += 1
             if proj_stats.get("events"):
@@ -3392,9 +3406,6 @@ async def _build_per_tick_prices_grid(
     async for snap in replay.iter_snapshots():
         bb = snap.best_bid or 0.0
         ba = snap.best_ask or 0.0
-        if bb <= 0 and ba <= 0:
-            continue
-
         observed = snap.observed_at
         if observed is not None and observed.tzinfo is None:
             observed = observed.replace(tzinfo=timezone.utc)
@@ -3438,6 +3449,8 @@ async def _build_per_tick_prices_grid(
             "spread_bps": snap.spread_bps,
             "bid_depth": bid_depth,
             "ask_depth": ask_depth,
+            "bids": snap.levels("bid"),
+            "asks": snap.levels("ask"),
             "imbalance": (bid_depth / (bid_depth + ask_depth)) if (bid_depth + ask_depth) > 0 else 0.5,
             "observed_at": observed,
             # ── Live-shape superset (scanner._snapshot_ws_prices keys) ──
@@ -3729,7 +3742,9 @@ async def _replay_discover_opportunities(
             offset = (ev_ts - start_dt).total_seconds()
             if offset < 0:
                 continue
-            idx = min(n_ticks - 1, int(offset // actual_interval))
+            idx = bisect_left(ticks, ev_ts)
+            if idx == n_ticks:
+                continue
             token_id = str(getattr(ev, "token_id", "") or "").strip()
             market_payload = market_lookup.get(token_id)
             if not market_payload:
@@ -5627,6 +5642,7 @@ async def run_execution_backtest(
                             meta={
                                 "source": "opportunity",
                                 "opportunity_id": str(opp.id),
+                                "strategy_context": pdata.get("strategy_context") or {},
                                 "max_execution_price": pos.get("max_execution_price"),
                                 "price_policy": price_policy or None,
                                 "evaluate_decision": (

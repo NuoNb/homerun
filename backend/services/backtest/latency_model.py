@@ -51,16 +51,19 @@ class LatencyProfile:
         """Solve (mu, sigma) for a log-normal that hits a given p50/p95.
 
         log-normal: ln(X) ~ N(mu, sigma^2)
+        Equal positive quantiles select a constant delay (sigma = 0).
         median = exp(mu)            => mu = ln(p50)
         p95    = exp(mu + 1.645*sigma) => sigma = (ln(p95) - mu) / 1.645
         """
-        if p50_ms <= 0 or p95_ms <= 0 or p95_ms <= p50_ms:
+        if not (math.isfinite(p50_ms) and math.isfinite(p95_ms)) or p50_ms <= 0 or p95_ms < p50_ms:
             raise ValueError(
                 f"latency quantiles invalid: p50={p50_ms} p95={p95_ms}"
             )
         mu = math.log(p50_ms)
+        if p95_ms == p50_ms:
+            return cls(mu_ms=mu, sigma_ms=0.0, minimum_ms=p50_ms, maximum_ms=p50_ms)
         sigma = (math.log(p95_ms) - mu) / 1.6448536269514722
-        return cls(mu_ms=mu, sigma_ms=max(1e-6, sigma), minimum_ms=minimum_ms, maximum_ms=maximum_ms)
+        return cls(mu_ms=mu, sigma_ms=sigma, minimum_ms=minimum_ms, maximum_ms=maximum_ms)
 
     @classmethod
     def from_observations(
@@ -92,6 +95,8 @@ class LatencyProfile:
 
     def sample(self, rng: random.Random) -> float:
         """Draw one millisecond sample from the distribution."""
+        if self.sigma_ms == 0.0:
+            return _clamp(math.exp(self.mu_ms), self.minimum_ms, self.maximum_ms)
         z = rng.gauss(0.0, 1.0)
         ms = math.exp(self.mu_ms + self.sigma_ms * z)
         return _clamp(ms, self.minimum_ms, self.maximum_ms)
@@ -186,11 +191,10 @@ class LatencyModel:
     def deterministic(
         cls, *, submit_ms: float = 350.0, cancel_ms: float = 200.0
     ) -> "LatencyModel":
-        """Constant-latency model for unit tests."""
-        # sigma=0 collapses log-normal to a point mass at exp(mu)
+        """Constant-latency model for reproducible replay."""
         return cls(
-            submit=LatencyProfile(mu_ms=math.log(submit_ms), sigma_ms=1e-9),
-            cancel=LatencyProfile(mu_ms=math.log(cancel_ms), sigma_ms=1e-9),
+            submit=LatencyProfile.from_quantiles(p50_ms=submit_ms, p95_ms=submit_ms),
+            cancel=LatencyProfile.from_quantiles(p50_ms=cancel_ms, p95_ms=cancel_ms),
         )
 
 

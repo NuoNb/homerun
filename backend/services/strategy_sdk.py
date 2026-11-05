@@ -83,8 +83,8 @@ _rest_prime_last_ts: dict[str, float] = {}
 # live.  The backtester installs the tick's reconstructed per-token book
 # states here (the same grid the detect ``prices`` arg carries) around each
 # detect/on_event dispatch, exactly like the replay clock.  Fidelity is
-# top-of-book plus top-5 aggregate depth (what the recorded grid carries);
-# true L2 execution realism remains the matching engine's job at fill time.
+# the actual recorded ladders; discovery and execution see the same prices
+# and quantities, including empty and one-sided observations.
 _replay_books: Optional[dict[str, dict]] = None
 
 
@@ -120,6 +120,9 @@ def _replay_state_bid_ask(state: dict) -> tuple[Optional[float], Optional[float]
 def _replay_staleness_ms(state: dict) -> float:
     from utils.utcnow import utcnow as _now
 
+    observed_at = state.get("observed_at")
+    if isinstance(observed_at, datetime):
+        return max(0.0, (_now() - observed_at).total_seconds() * 1000.0)
     ts = state.get("ts")
     try:
         ts_f = float(ts)
@@ -3145,61 +3148,61 @@ class StrategySDK:
         token_id = StrategySDK._resolve_token_id(market, side)
         if token_id is None:
             return None
+        from services.optimization.vwap import OrderBook, OrderBookLevel, VWAPCalculator
+
         if _replay_books is not None:
             state = _replay_books.get(token_id)
             if not isinstance(state, dict):
                 return None
             _bid, ask = _replay_state_bid_ask(state)
-            if ask is None:
+            asks = state.get("asks")
+            if ask is None or not asks:
                 return None
-            ask_depth = float(state.get("ask_depth") or 0.0)
-            return {
-                "vwap_price": ask,
-                "slippage_bps": 0.0,
-                "fill_probability": 1.0,
-                "available_liquidity": ask_depth * ask,
-                "is_fresh": bool(state.get("is_fresh", True)),
-                "staleness_ms": round(_replay_staleness_ms(state), 1),
-            }
-        try:
-            from services.ws_feeds import get_feed_manager
-            from services.optimization.vwap import VWAPCalculator
-        except ImportError as e:
-            logger.error("StrategySDK orderbook deps unavailable: %s", e)
-            return None
-
-        cache = get_feed_manager().cache
-        order_book = cache.get_order_book(token_id)
-        if order_book is None:
-            logger.debug(
-                "StrategySDK.get_order_book_depth: no cached book for token %s "
-                "(market %s, side %s) — token may not be subscribed",
-                token_id[:18], getattr(market, "id", "?"), side,
+            order_book = OrderBook(
+                bids=[OrderBookLevel(price=p, size=s) for p, s in state.get("bids", ())],
+                asks=[OrderBookLevel(price=p, size=s) for p, s in asks],
             )
-            now_s = time.monotonic()
-            last = _rest_prime_last_ts.get(token_id, 0.0)
-            if now_s - last >= _REST_PRIME_COOLDOWN_S:
-                _rest_prime_last_ts[token_id] = now_s
-                _prime_book_via_rest(token_id)
-            return None
+            is_fresh = bool(state.get("is_fresh", True))
+            staleness_ms = _replay_staleness_ms(state)
+        else:
+            try:
+                from services.ws_feeds import get_feed_manager
+            except ImportError as exc:
+                logger.error("StrategySDK orderbook deps unavailable", exc_info=exc)
+                return None
+
+            cache = get_feed_manager().cache
+            order_book = cache.get_order_book(token_id)
+            if order_book is None:
+                logger.debug(
+                    "StrategySDK.get_order_book_depth: no cached book for token %s "
+                    "(market %s, side %s) — token may not be subscribed",
+                    token_id[:18], getattr(market, "id", "?"), side,
+                )
+                now_s = time.monotonic()
+                last = _rest_prime_last_ts.get(token_id, 0.0)
+                if now_s - last >= _REST_PRIME_COOLDOWN_S:
+                    _rest_prime_last_ts[token_id] = now_s
+                    _prime_book_via_rest(token_id)
+                return None
+            is_fresh = cache.is_fresh(token_id)
+            staleness_ms = (cache.staleness(token_id) or 0.0) * 1000.0
 
         try:
             result = VWAPCalculator().calculate_buy_vwap(order_book, size_usd)
-        except Exception as e:
-            logger.exception(
-                "StrategySDK.get_order_book_depth: VWAP failed for token %s: %s",
-                token_id[:18], e,
+        except Exception as exc:
+            logger.error(
+                "StrategySDK.get_order_book_depth: VWAP failed", extra={"token_id": token_id[:18]}, exc_info=exc
             )
             return None
 
-        staleness_s = cache.staleness(token_id) or 0.0
         return {
             "vwap_price": float(result.vwap),
             "slippage_bps": float(result.slippage_bps),
             "fill_probability": float(result.fill_probability),
             "available_liquidity": float(result.total_available),
-            "is_fresh": cache.is_fresh(token_id),
-            "staleness_ms": round(staleness_s * 1000.0, 1),
+            "is_fresh": is_fresh,
+            "staleness_ms": round(staleness_ms, 1),
         }
 
     @staticmethod
@@ -3235,9 +3238,10 @@ class StrategySDK:
             _bid, ask = _replay_state_bid_ask(state)
             if ask is None or max_levels < 1:
                 return None
-            # Replay grid carries aggregate top-5 depth, not the ladder —
-            # surface it as one synthetic level at best ask.
-            return [{"price": ask, "size": float(state.get("ask_depth") or 0.0)}]
+            asks = state.get("asks")
+            if not asks:
+                return None
+            return [{"price": float(price), "size": float(size)} for price, size in asks[:max_levels]]
         try:
             from services.ws_feeds import get_feed_manager
         except ImportError as e:
@@ -3312,9 +3316,9 @@ class StrategySDK:
             state = _replay_books.get(token_id)
             if not isinstance(state, dict):
                 return None
-            # Replay grid carries aggregate top-5 depth per side.
-            bid_size = float(state.get("bid_depth") or 0.0)
-            ask_size = float(state.get("ask_depth") or 0.0)
+            n = max(1, int(levels))
+            bid_size = sum(float(size) for _price, size in state.get("bids", ())[:n])
+            ask_size = sum(float(size) for _price, size in state.get("asks", ())[:n])
             denom = bid_size + ask_size
             if denom <= 0.0:
                 return None

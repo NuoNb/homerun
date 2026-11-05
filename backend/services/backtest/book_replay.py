@@ -129,6 +129,14 @@ class BookSnapshot:
         a = self.asks
         return a[0].price if a else None
 
+    def levels(self, side: str) -> Sequence[tuple[float, float]]:
+        """Return the actual price/size ladder without materialising PriceLevels."""
+        is_bid = (side or "").lower() in ("bid", "buy")
+        raw = self._bids_raw if is_bid else self._asks_raw
+        if raw is not None:
+            return raw
+        return tuple((level.price, level.size) for level in (self.bids if is_bid else self.asks))
+
     def depth(self, side: str, levels: int = 5) -> float:
         """Sum of size across the top ``levels`` of one side.  Reads the raw
         (price, size) arrays when present so it does NOT materialise the lazy
