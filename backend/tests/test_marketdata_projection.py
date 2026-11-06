@@ -191,10 +191,11 @@ async def test_scanner_projection_preserves_ladders_and_clears_empty_books() -> 
             return BookSnapshot(token_id, tick)
         return BookSnapshot(token_id, tick, bids_raw=((0.49, 50),), asks_raw=((0.5, 2), (0.6, 3)))
 
-    events, _ = await project_market_data_refresh_events(
+    stream, _ = await project_market_data_refresh_events(
         start=base, end=base + timedelta(seconds=1), cadence_seconds=1,
         markets=[_market()], view=SimpleNamespace(book_at=book_at),
     )
+    events = [event async for event in stream]
     assert len(events) == 2
     assert events[0].markets[0]["down_price"] is None
     assert events[0].prices["UP"]["asks"] == ((0.5, 2), (0.6, 3))
@@ -247,3 +248,110 @@ def test_projected_catalog_hydrates_independent_prices_without_complements(
     assert market.outcome_prices == expected
     assert [token.price for token in market.tokens] == expected
     assert market.end_date == datetime(2026, 5, 28, 21, 5, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_scanner_projection_memory_is_bounded_by_current_tick() -> None:
+    import tracemalloc
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from services.backtest.book_replay import BookSnapshot
+    from services.marketdata.projection import project_market_data_refresh_events
+
+    start = datetime(2026, 5, 28, 21, 0, tzinfo=timezone.utc)
+    market = _market()
+    market.end_us = _us(start + timedelta(hours=1))
+
+    async def book_at(token_id, tick, **kwargs):
+        return BookSnapshot(token_id, tick, bids_raw=((0.49, 3),), asks_raw=((0.51, 3),))
+
+    tracemalloc.start()
+    try:
+        events, stats = await project_market_data_refresh_events(
+            start=start, end=start + timedelta(seconds=1250), cadence_seconds=0.125,
+            markets=[market], view=SimpleNamespace(book_at=book_at),
+        )
+        assert tracemalloc.get_traced_memory()[1] < 8 * 1024**2
+        count = 0
+        async for event in events:
+            assert event.timestamp == start + timedelta(seconds=count * 0.125)
+            count += 1
+        assert count == 10_001
+        assert stats["events"] == count
+        assert tracemalloc.get_traced_memory()[1] < 8 * 1024**2
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.asyncio
+async def test_scanner_projection_releases_ended_market_books_and_keeps_provenance(
+    tmp_path, monkeypatch
+) -> None:
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+
+    from services.marketdata.projection import project_market_data_refresh_events
+
+    start = datetime(2026, 5, 28, 21, 0, tzinfo=timezone.utc)
+    markets = []
+    by_token = {}
+    for i in range(3):
+        market = _market()
+        market.market_id = str(i)
+        market.start_us = _us(start + timedelta(seconds=i))
+        market.end_us = _us(start + timedelta(seconds=i + 1))
+        market.up_token, market.down_token = f"up{i}", f"down{i}"
+        markets.append(market)
+        for token in market.tokens:
+            path = tmp_path / f"{token}.parquet"
+            _write_snapshot_file(path, token, [(market.start_us, 0.4, 0.6)])
+            by_token[token] = TokenCoverage(
+                token, files=(str(path),), start_us=market.start_us, end_us=market.end_us,
+            )
+    end = start + timedelta(seconds=3)
+    coverage = CoverageMap(
+        by_token=by_token, requested=tuple(by_token),
+        window_start_us=_us(start), window_end_us=_us(end),
+    )
+    view = MarketDataView(coverage=coverage, start=start, end=end)
+    monkeypatch.setattr(MarketDataView, "build", AsyncMock(return_value=view))
+    stream, stats = await project_market_data_refresh_events(
+        start=start, end=end, cadence_seconds=0.125, markets=markets,
+    )
+    seen = set()
+    async for event in stream:
+        assert view.loaded_token_count() <= 2
+        seen.update(event.prices)
+        assert all(book["observed_at"] <= event.timestamp for book in event.prices.values())
+    assert seen == set(by_token)
+    assert stats["events"] == 24
+    assert view.loaded_token_count() == 0
+    pin = view.dataset_snapshot()
+    assert sum(entry.rows for entry in pin.entries) == 6
+    snap = await view.book_at("up0", start)
+    assert snap is not None and snap.best_bid == 0.4
+    assert view.loaded_token_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_scanner_projection_closing_stream_releases_its_books(monkeypatch) -> None:
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from services.backtest.book_replay import BookSnapshot
+    from services.marketdata.projection import project_market_data_refresh_events
+
+    start = datetime(2026, 5, 28, 21, 0, tzinfo=timezone.utc)
+    release = Mock()
+    view = SimpleNamespace(
+        book_at=AsyncMock(return_value=BookSnapshot("UP", start)), release_tokens=release,
+    )
+    monkeypatch.setattr(MarketDataView, "build", AsyncMock(return_value=view))
+    stream, _ = await project_market_data_refresh_events(
+        start=start, end=start + timedelta(seconds=1), markets=[_market()],
+    )
+    await anext(stream)
+    await stream.aclose()
+    assert set(release.call_args.args[0]) == {"UP", "DOWN"}

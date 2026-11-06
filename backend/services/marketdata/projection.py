@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, AsyncGenerator, Iterable, Optional
 from urllib.parse import unquote, urlparse
 
 from services.marketdata.view import MarketDataView
@@ -349,7 +349,7 @@ async def project_market_data_refresh_events(
     max_staleness_seconds: float = DEFAULT_MAX_STALENESS_SECONDS,
     view: Optional[MarketDataView] = None,
     markets: Optional[list[ProjectedMarket]] = None,
-) -> tuple[list[Any], dict[str, Any]]:
+) -> tuple[AsyncGenerator[Any, None], dict[str, Any]]:
     """Reconstruct ``DataEvent(MARKET_DATA_REFRESH)`` events from imported book parquet.
 
     Scanner-tick strategies (``subscriptions=["market_data_refresh"]``, e.g.
@@ -371,7 +371,7 @@ async def project_market_data_refresh_events(
     ``markets`` / ``view`` may be supplied pre-built (skips the DB metadata
     load / parquet view build).
 
-    Returns ``(events, stats)``.
+    Returns an async event stream and counters updated as the stream is consumed.
     """
     from services.strategy_inputs import build_market_data_refresh_inputs
 
@@ -383,11 +383,8 @@ async def project_market_data_refresh_events(
             start=start, end=end, providers=tuple(providers), token_scope=scope,
         )
     active = [m for m in markets if m.market_key() not in exclude and m.tokens]
-    if not active:
-        return [], {"markets_loaded": len(markets), "markets_active": 0, "events": 0}
-
-    # Build (or reuse) a view over every token the active markets touch.
-    if view is None:
+    owns_view = view is None
+    if view is None and active:
         all_tokens = sorted({t for m in active for t in m.tokens})
         view = await MarketDataView.build(
             token_ids=all_tokens, start=start, end=end, providers=tuple(providers),
@@ -397,66 +394,76 @@ async def project_market_data_refresh_events(
     start_us = int(start.astimezone(timezone.utc).timestamp() * 1_000_000) if start.tzinfo else int(start.timestamp() * 1_000_000)
     end_us = int(end.astimezone(timezone.utc).timestamp() * 1_000_000) if end.tzinfo else int(end.timestamp() * 1_000_000)
 
-    events: list[Any] = []
-    n_market_dicts = 0
-    tick_us = start_us
-    while tick_us <= end_us:
-        tick = datetime.fromtimestamp(tick_us / 1_000_000, tz=timezone.utc)
-        market_dicts: list[dict[str, Any]] = []
-        # {token_id: book} prices map — mirrors the live scanner's ``prices``
-        # arg so scanner_tick strategies (tail_end_carry reads the book HERE,
-        # not from market.best_bid/ask) fire identically on imported data and
-        # on the recorded catalog-snapshot gold path.
-        prices_map: dict[str, dict[str, Any]] = {}
-        for m in active:
-            if not m.alive_at(tick_us):
-                continue
-            up_snap = await view.book_at(m.up_token, tick, max_staleness_seconds=max_staleness_seconds) if m.up_token else None
-            down_snap = await view.book_at(m.down_token, tick, max_staleness_seconds=max_staleness_seconds) if m.down_token else None
-            up_bid = up_snap.bids[0].price if (up_snap and up_snap.bids) else None
-            up_ask = up_snap.asks[0].price if (up_snap and up_snap.asks) else None
-            down_bid = down_snap.bids[0].price if (down_snap and down_snap.bids) else None
-            down_ask = down_snap.asks[0].price if (down_snap and down_snap.asks) else None
-            md = _catalog_market_dict(m, tick=tick, up_bid=up_bid, up_ask=up_ask, down_bid=down_bid, down_ask=down_ask)
-            market_dicts.append(md)
-            for token_id, snap in ((m.up_token, up_snap), (m.down_token, down_snap)):
-                if token_id:
-                    prices_map[str(token_id)] = {
-                        "bid": snap.best_bid if snap else None,
-                        "ask": snap.best_ask if snap else None,
-                        "best_bid": snap.best_bid if snap else None,
-                        "best_ask": snap.best_ask if snap else None,
-                        "mid": snap.mid if snap else None,
-                        "bids": snap.levels("bid") if snap else (),
-                        "asks": snap.levels("ask") if snap else (),
-                        "observed_at": snap.observed_at if snap else None,
-                        "is_fresh": snap is not None,
-                    }
-        if prices_map:
-            n_market_dicts += len(market_dicts)
-            events.append(build_market_data_refresh_inputs(
-                source="marketdata.projection",
-                timestamp=tick,
-                payload={
-                    "markets": market_dicts,
-                    "prices": prices_map,
-                    "updated_at": tick.isoformat().replace("+00:00", "Z"),
-                    "trigger": "marketdata.projection",
-                    "event_source": "imported_parquet",
-                },
-                markets=market_dicts,
-                prices=prices_map,
-            ))
-        tick_us += cadence_us
-
     stats = {
         "markets_loaded": len(markets),
         "markets_active": len(active),
-        "events": len(events),
-        "market_dicts": n_market_dicts,
+        "events": 0,
+        "market_dicts": 0,
         "cadence_seconds": cadence_seconds,
     }
-    return events, stats
+
+    async def iter_events() -> AsyncGenerator[Any, None]:
+        try:
+            tick_us = start_us
+            previous_tokens: set[str] = set()
+            while tick_us <= end_us and active:
+                tick = datetime.fromtimestamp(tick_us / 1_000_000, tz=timezone.utc)
+                market_dicts: list[dict[str, Any]] = []
+                # {token_id: book} prices map — mirrors the live scanner's ``prices``
+                # arg so scanner_tick strategies (tail_end_carry reads the book HERE,
+                # not from market.best_bid/ask) fire identically on imported data and
+                # on the recorded catalog-snapshot gold path.
+                prices_map: dict[str, dict[str, Any]] = {}
+                alive = [m for m in active if m.alive_at(tick_us)]
+                live_tokens = {t for m in alive for t in m.tokens}
+                expired_tokens = previous_tokens - live_tokens
+                if expired_tokens:
+                    view.release_tokens(expired_tokens)
+                previous_tokens = live_tokens
+                for m in alive:
+                    up_snap = await view.book_at(m.up_token, tick, max_staleness_seconds=max_staleness_seconds) if m.up_token else None
+                    down_snap = await view.book_at(m.down_token, tick, max_staleness_seconds=max_staleness_seconds) if m.down_token else None
+                    up_bid = up_snap.bids[0].price if (up_snap and up_snap.bids) else None
+                    up_ask = up_snap.asks[0].price if (up_snap and up_snap.asks) else None
+                    down_bid = down_snap.bids[0].price if (down_snap and down_snap.bids) else None
+                    down_ask = down_snap.asks[0].price if (down_snap and down_snap.asks) else None
+                    md = _catalog_market_dict(m, tick=tick, up_bid=up_bid, up_ask=up_ask, down_bid=down_bid, down_ask=down_ask)
+                    market_dicts.append(md)
+                    for token_id, snap in ((m.up_token, up_snap), (m.down_token, down_snap)):
+                        if token_id:
+                            prices_map[str(token_id)] = {
+                                "bid": snap.best_bid if snap else None,
+                                "ask": snap.best_ask if snap else None,
+                                "best_bid": snap.best_bid if snap else None,
+                                "best_ask": snap.best_ask if snap else None,
+                                "mid": snap.mid if snap else None,
+                                "bids": snap.levels("bid") if snap else (),
+                                "asks": snap.levels("ask") if snap else (),
+                                "observed_at": snap.observed_at if snap else None,
+                                "is_fresh": snap is not None,
+                            }
+                if prices_map:
+                    stats["market_dicts"] += len(market_dicts)
+                    stats["events"] += 1
+                    yield build_market_data_refresh_inputs(
+                        source="marketdata.projection",
+                        timestamp=tick,
+                        payload={
+                            "markets": market_dicts,
+                            "prices": prices_map,
+                            "updated_at": tick.isoformat().replace("+00:00", "Z"),
+                            "trigger": "marketdata.projection",
+                            "event_source": "imported_parquet",
+                        },
+                        markets=market_dicts,
+                        prices=prices_map,
+                    )
+                tick_us += cadence_us
+        finally:
+            if owns_view and view is not None:
+                view.release_tokens(t for m in active for t in m.tokens)
+
+    return iter_events(), stats
 
 
 async def project_crypto_update_events(

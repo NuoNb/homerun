@@ -345,13 +345,19 @@ async def test_events_are_delivered_at_first_tick_after_observation(
     async def project(**kwargs: Any) -> tuple[list[SimpleNamespace], dict[str, int]]:
         return (projected_events if projected else []), {}
 
+    async def project_catalog(**kwargs: Any):
+        async def events():
+            for event in projected_events if projected else []:
+                yield event
+        return events(), {}
+
     monkeypatch.setattr(backtest_bridge, "replay_events_for_strategy", replay)
     monkeypatch.setattr(projection, "project_crypto_update_events", project)
-    monkeypatch.setattr(projection, "project_market_data_refresh_events", project)
+    monkeypatch.setattr(projection, "project_market_data_refresh_events", project_catalog)
     monkeypatch.setattr(strategy_backtester, "_CATALOG_TICK_GRID_CACHE", OrderedDict())
     ticks = [T0 + timedelta(milliseconds=ms) for ms in (0, 100, 200)]
     bins = [[], [], []]
-    count = await strategy_backtester._replay_bus_events_into_tick_grid(
+    count, stream = await strategy_backtester._replay_bus_events_into_tick_grid(
         strategy=SimpleNamespace(subscriptions=[topic]),
         start_dt=T0,
         ticks=ticks,
@@ -361,6 +367,14 @@ async def test_events_are_delivered_at_first_tick_after_observation(
         candidate_token_ids=[],
         catalog_markets=[],
     )
+    if stream is not None:
+        from bisect import bisect_left
+
+        async for event in stream:
+            index = bisect_left(ticks, event.timestamp)
+            if index < len(ticks):
+                bins[index].append(event)
+                count += 1
     assert count == 2
     assert bins[0] == []
     assert [event.timestamp for event in bins[1]] == times[:1]
@@ -580,3 +594,86 @@ async def test_partial_ioc_exit_retries_only_the_remaining_position() -> None:
     assert exits[1].submitted_at >= exits[0].venue_received_at
     assert engine.portfolio.closed_position_count() == 1
     assert engine.portfolio.open_position_count() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_scanner_replay_consumes_projected_stream_causally_and_closes_it(
+    monkeypatch: pytest.MonkeyPatch, cancel: bool
+) -> None:
+    from services import strategy_backtester
+    from services.strategy_inputs import build_market_data_refresh_inputs
+
+    produced = []
+    dispatched = []
+    closed = []
+
+    async def events():
+        try:
+            for seconds in (0.0, 1.25, 2.5):
+                at = T0 + timedelta(seconds=seconds)
+                produced.append(at)
+                yield build_market_data_refresh_inputs(
+                    source="test", timestamp=at, payload={},
+                    markets=[{"id": "market", "question": "Test", "clob_token_ids": ["token"]}],
+                    prices={"token": {"observed_at": at, "bid": 0.4 + seconds / 100}},
+                )
+        finally:
+            closed.append(True)
+
+    stream = events()
+    monkeypatch.setattr(
+        strategy_backtester, "_replay_bus_events_into_tick_grid",
+        AsyncMock(return_value=(0, stream)),
+    )
+    monkeypatch.setattr(
+        "services.shared_state._read_market_catalog_file", lambda: ([], [], {}),
+    )
+
+    class ProbeStrategy:
+        subscriptions = ["market_data_refresh"]
+
+        def detect(self, events, markets, prices):
+            return []
+
+    async def detect(strategy, **kwargs):
+        book = kwargs["prices"]["token"]
+        tick = datetime.fromtimestamp(kwargs["now_us"] / 1_000_000, tz=timezone.utc)
+        assert book["observed_at"] <= tick
+        dispatched.append((tick, book["observed_at"]))
+        return []
+
+    monkeypatch.setattr(strategy_backtester, "_run_detect_once", detect)
+    probes = []
+
+    class CancelledRun(Exception):
+        marker = "operator_cancel"
+
+    async def progress(*args):
+        probes.append(True)
+        if cancel and len(probes) == 3:
+            raise CancelledRun("operator stop")
+
+    async def replay():
+        return await strategy_backtester._replay_discover_opportunities(
+            strategy=ProbeStrategy(), slug="unit_scanner_stream",
+            start_dt=T0, end_dt=T0 + timedelta(seconds=60),
+            sample_interval_seconds=1, max_ticks=60, progress_callback=progress,
+        )
+
+    if cancel:
+        with pytest.raises(CancelledRun):
+            await replay()
+        assert len(dispatched) == 2
+        assert len(produced) <= 3
+    else:
+        _, stats = await replay()
+        assert stats["failures"] == 0
+        assert len(dispatched) == 60
+        assert dispatched[:4] == [
+            (T0, T0),
+            (T0 + timedelta(seconds=1), T0),
+            (T0 + timedelta(seconds=2), T0 + timedelta(seconds=1.25)),
+            (T0 + timedelta(seconds=3), T0 + timedelta(seconds=2.5)),
+        ]
+    assert closed == [True]

@@ -131,6 +131,10 @@ class MarketDataView:
         self._rows_read[tok] = rows
         return series
 
+    def release_tokens(self, token_ids: Iterable[str]) -> None:
+        for token_id in token_ids:
+            self._series_cache.pop(str(token_id), None)
+
     async def book_at(
         self,
         token_id: str,

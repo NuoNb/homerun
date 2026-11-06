@@ -18,7 +18,7 @@ from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, AsyncGenerator, Optional
 
 from models.database import AsyncSessionLocal
 from services.strategy_loader import StrategyLoader, validate_strategy_source
@@ -2889,7 +2889,7 @@ async def _replay_bus_events_into_tick_grid(
     events_by_tick: list[list[Any]],
     candidate_token_ids: list[str] | None,
     catalog_markets: list[Any],
-) -> int:
+) -> tuple[int, AsyncGenerator[Any, None] | None]:
     """Stream events for ``strategy.subscriptions`` through the
     recorded-event bus and bin them into ``events_by_tick`` for the
     discovery loop.
@@ -2904,7 +2904,7 @@ async def _replay_bus_events_into_tick_grid(
     subscribing to them.  The bridge is the one place that knows how
     to translate "bus envelope" → "strategy-shaped event payload."
 
-    Returns the number of bus envelopes binned.  Best-effort: any
+    Returns the recorded event count and an optional imported catalog stream. Any
     failure is logged and swallowed (the existing wallet_trade /
     book-driven paths keep working).
     """
@@ -2915,12 +2915,12 @@ async def _replay_bus_events_into_tick_grid(
         import services.recorded_event_bus.storage  # noqa: F401 -- attach
         from services.data_events import DataEvent, EventType
     except Exception:
-        return 0
+        return 0, None
 
     subs = getattr(strategy, "subscriptions", None) or []
     topics = resolve_subscriptions_to_topics(subs)
     if not topics:
-        return 0
+        return 0, None
 
     # Topic-specific projector: bus envelope → the shape strategy
     # detect() expects in ``events`` list.  Each entry reconstructs
@@ -3240,43 +3240,22 @@ async def _replay_bus_events_into_tick_grid(
     # same MARKET_DATA_REFRESH shape from the imported ProviderDataset
     # metadata + point-in-time book — gap-filling only markets WITHOUT real
     # recorded catalog coverage so recorded snapshots stay authoritative.
+    projected_catalog_events = None
     if "polymarket.catalog.snapshot" in topics:
-        try:
-            from services.marketdata.projection import project_market_data_refresh_events
+        from services.marketdata.projection import project_market_data_refresh_events
 
-            window_end = ticks[-1] + (
-                ticks[-1] - ticks[-2] if len(ticks) >= 2 else timedelta(seconds=actual_interval)
-            )
-            proj_events, proj_stats = await project_market_data_refresh_events(
-                start=ticks[0],
-                end=window_end,
-                cadence_seconds=max(_MIN_DISCOVERY_INTERVAL_SECONDS, float(actual_interval)),
-                token_scope=candidate_token_ids,
-                exclude_market_keys=real_catalog_market_keys,
-            )
-            for ev in proj_events:
-                offset = (ev.timestamp - start_dt).total_seconds()
-                if offset < 0:
-                    continue
-                idx = bisect_left(ticks, ev.timestamp)
-                if idx == n_ticks:
-                    continue
-                events_by_tick[idx].append(ev)
-                n_binned += 1
-            if proj_stats.get("events"):
-                logger.info(
-                    "marketdata.projection: gap-filled %d market_data_refresh events from "
-                    "%d imported markets",
-                    proj_stats.get("events"),
-                    proj_stats.get("markets_active"),
-                )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "marketdata.projection: imported-parquet market_data_refresh projection failed",
-                exc_info=True,
-            )
+        window_end = ticks[-1] + (
+            ticks[-1] - ticks[-2] if len(ticks) >= 2 else timedelta(seconds=actual_interval)
+        )
+        projected_catalog_events, _ = await project_market_data_refresh_events(
+            start=ticks[0],
+            end=window_end,
+            cadence_seconds=max(_MIN_DISCOVERY_INTERVAL_SECONDS, float(actual_interval)),
+            token_scope=candidate_token_ids,
+            exclude_market_keys=real_catalog_market_keys,
+        )
 
-    return n_binned
+    return n_binned, projected_catalog_events
 
 
 def _wallet_event_to_strategy_input(
@@ -3699,8 +3678,10 @@ async def _replay_discover_opportunities(
     #
     # Falls back to a no-op on errors so the existing wallet_trade
     # special case + book-driven path keep working unchanged.
+    projected_catalog_events = None
+    projected_catalog_next = None
     try:
-        bus_event_count = await _replay_bus_events_into_tick_grid(
+        bus_event_count, projected_catalog_events = await _replay_bus_events_into_tick_grid(
             strategy=strategy,
             start_dt=start_dt,
             ticks=ticks,
@@ -3825,236 +3806,247 @@ async def _replay_discover_opportunities(
     # coarse grids (a handful of multi-minute ticks) still get probed.
     _cancel_probe_every = max(1, min(50, n_ticks // 40))
     _discover_t0 = time.monotonic()
-    for tick_i in range(n_ticks):
-        tick_t = ticks[tick_i]
+    try:
+        for tick_i in range(n_ticks):
+            tick_t = ticks[tick_i]
 
-        # Universal discovery-progress heartbeat (any strategy / resolution).
-        # Sub-second replays can be 10k-100k+ ticks; without this the run is a
-        # silent multi-minute black box.  Logs ~20 lines/run with a live ETA.
-        if n_ticks >= 400 and tick_i and tick_i % _progress_every == 0:
-            _el = time.monotonic() - _discover_t0
-            _eta = _el * (n_ticks - tick_i) / max(1, tick_i)
-            logger.info(
-                "discovery replay: tick %d/%d (%.0f%%) · %d opps · %.0fs elapsed · ~%.0fs left",
-                tick_i, n_ticks, 100.0 * tick_i / n_ticks, len(detected_total), _el, _eta,
-            )
+            # Universal discovery-progress heartbeat (any strategy / resolution).
+            # Sub-second replays can be 10k-100k+ ticks; without this the run is a
+            # silent multi-minute black box.  Logs ~20 lines/run with a live ETA.
+            if n_ticks >= 400 and tick_i and tick_i % _progress_every == 0:
+                _el = time.monotonic() - _discover_t0
+                _eta = _el * (n_ticks - tick_i) / max(1, tick_i)
+                logger.info(
+                    "discovery replay: tick %d/%d (%.0f%%) · %d opps · %.0fs elapsed · ~%.0fs left",
+                    tick_i, n_ticks, 100.0 * tick_i / n_ticks, len(detected_total), _el, _eta,
+                )
 
-        # Cancellation probe.  The job-queue progress callback raises
-        # BacktestCancelled when the operator hit stop; without this probe a
-        # cancel lands only once the matching engine starts yielding — a
-        # multi-minute discovery phase would grind on for a cancelled run.
-        # Callback exceptions must propagate (run_job catches them), so this
-        # is deliberately OUTSIDE the per-tick try below.
-        if progress_callback is not None and tick_i % _cancel_probe_every == 0:
-            await progress_callback(0, 0.0, 0)
+            # Cancellation probe.  The job-queue progress callback raises
+            # BacktestCancelled when the operator hit stop; without this probe a
+            # cancel lands only once the matching engine starts yielding — a
+            # multi-minute discovery phase would grind on for a cancelled run.
+            # Callback exceptions must propagate (run_job catches them), so this
+            # is deliberately OUTSIDE the per-tick try below.
+            if progress_callback is not None and tick_i % _cancel_probe_every == 0:
+                await progress_callback(0, 0.0, 0)
 
-        # Prices at this tick — built from the streaming grid for book-
-        # driven strategies, empty for event-driven ones.
-        prices_at_tick: dict[str, dict[str, Any]] = {}
-        if grid:
-            for token_id, states in grid.items():
-                if tick_i < len(states):
-                    st = states[tick_i]
-                    if st is not None:
-                        prices_at_tick[token_id] = st
+            # Prices at this tick — built from the streaming grid for book-
+            # driven strategies, empty for event-driven ones.
+            prices_at_tick: dict[str, dict[str, Any]] = {}
+            if grid:
+                for token_id, states in grid.items():
+                    if tick_i < len(states):
+                        st = states[tick_i]
+                        if st is not None:
+                            prices_at_tick[token_id] = st
 
-        events_at_tick = events_by_tick[tick_i]
-        # Release the grid's reference now — the local above carries this
-        # tick's events through the iteration, and a multi-day scanner_tick
-        # window holds GBs of parsed catalog envelopes if the whole grid
-        # stays alive until return.  Peak memory then scales with the
-        # remaining ticks, not the full window.
-        events_by_tick[tick_i] = []
+            events_at_tick = events_by_tick[tick_i]
+            if projected_catalog_events is not None:
+                if projected_catalog_next is None:
+                    projected_catalog_next = await anext(projected_catalog_events, None)
+                while projected_catalog_next is not None and projected_catalog_next.timestamp <= tick_t:
+                    if projected_catalog_next.timestamp >= start_dt:
+                        events_at_tick.append(projected_catalog_next)
+                    projected_catalog_next = await anext(projected_catalog_events, None)
+            # Release the grid's reference now — the local above carries this
+            # tick's events through the iteration, and a multi-day scanner_tick
+            # window holds GBs of parsed catalog envelopes if the whole grid
+            # stays alive until return.  Peak memory then scales with the
+            # remaining ticks, not the full window.
+            events_by_tick[tick_i] = []
 
-        # Decide which markets to surface to detect().  Event-driven
-        # strategies receive the catalog narrowed to the markets their
-        # events actually touch this tick (the strategy then reads the
-        # ``market`` payload from the event itself, but a non-empty
-        # markets list keeps any defensive ``if not markets`` guards
-        # in strategy code happy).  Book-driven strategies see markets
-        # whose tokens have reconstructable prices.
-        if event_kind == "crypto_update":
-            # CRYPTO_UPDATE DataEvents carry the full markets array in
-            # their payload — time-correct top-of-book + oracle + price-
-            # to-beat, recorded from the live dispatcher.  Surface those
-            # markets directly to detect(); ignore catalog_markets (the
-            # current-only catalog file is not the right source for a
-            # historical replay).  Dedupe by market id across events in
-            # this tick — last-seen wins, matching live "latest dispatch".
-            if not events_at_tick:
-                continue
-            markets_by_id: dict[str, dict] = {}
-            for ev in events_at_tick:
-                payload = getattr(ev, "payload", None) or (ev if isinstance(ev, dict) else {})
-                if not isinstance(payload, dict):
+            # Decide which markets to surface to detect().  Event-driven
+            # strategies receive the catalog narrowed to the markets their
+            # events actually touch this tick (the strategy then reads the
+            # ``market`` payload from the event itself, but a non-empty
+            # markets list keeps any defensive ``if not markets`` guards
+            # in strategy code happy).  Book-driven strategies see markets
+            # whose tokens have reconstructable prices.
+            if event_kind == "crypto_update":
+                # CRYPTO_UPDATE DataEvents carry the full markets array in
+                # their payload — time-correct top-of-book + oracle + price-
+                # to-beat, recorded from the live dispatcher.  Surface those
+                # markets directly to detect(); ignore catalog_markets (the
+                # current-only catalog file is not the right source for a
+                # historical replay).  Dedupe by market id across events in
+                # this tick — last-seen wins, matching live "latest dispatch".
+                if not events_at_tick:
                     continue
-                for m in (payload.get("markets") or []):
-                    if isinstance(m, dict):
-                        key = str(m.get("id") or m.get("condition_id") or m.get("slug") or "")
-                        if key:
-                            markets_by_id[key] = m
-            markets_at_tick: list[dict] = list(markets_by_id.values())
-        elif event_kind == "scanner_tick":
-            # Recorded catalog-snapshot replay — each
-            # polymarket.catalog.snapshot envelope projects to a
-            # MARKET_DATA_REFRESH DataEvent carrying the full catalog at
-            # refresh time.  Carry that catalog forward across ticks until
-            # a fresher snapshot arrives (refresh cadence is minutes;
-            # tick cadence is seconds).  Per-tick prices come from the
-            # parquet book grid (live_ingestor) — we augment each market
-            # dict with the current best_bid/best_ask so the strategy
-            # sees fresh top-of-book on every tick.
-            for ev in events_at_tick:
-                for m in (getattr(ev, "markets", None) or []):
-                    if isinstance(m, dict):
-                        key = str(m.get("id") or m.get("condition_id") or m.get("slug") or "")
-                        if key:
-                            carry_catalog_markets[key] = m
-                # Carry the recorded per-token book (the live ``prices`` arg)
-                # forward, latest-wins per token — the live shared price cache.
-                # The catalog-snapshot tee records exactly the book live's
-                # detect() saw (the live scanner mutates the markets with fresh
-                # WS book AND passes the same book as the prices arg).
-                ev_prices = getattr(ev, "prices", None)
-                if isinstance(ev_prices, dict):
-                    for tid, book in ev_prices.items():
-                        if isinstance(book, dict):
-                            carry_catalog_prices[str(tid)] = book
-            if not carry_catalog_markets:
-                # Pre-recording window — no catalog snapshot seen yet.
-                continue
-            # The recorded catalog markets already carry their live top-of-book
-            # (the live scanner mutates them via _apply_live_prices_to_markets
-            # before publishing, so the tee captured best_bid/ask), and the
-            # carried ``prices`` arg below carries the same book in
-            # {token_id: book} form.  Pass BOTH through AS-IS — no
-            # reconstruction — so detect() sees byte-identical (markets, prices)
-            # to live.  (The book-driven price grid is intentionally not built
-            # for event-driven strategies, so there is nothing to augment from.)
-            markets_at_tick = list(carry_catalog_markets.values())
-            prices_at_tick = dict(carry_catalog_prices)
-        elif event_kind is not None:
-            if not events_at_tick:
-                continue
-            event_token_ids: set[str] = set()
-            for item in events_at_tick:
-                if isinstance(item, dict):
-                    market_meta = item.get("market") or {}
-                    if isinstance(market_meta, dict):
-                        tid = str(market_meta.get("token_id") or "").strip()
-                        if tid:
-                            event_token_ids.add(tid)
-            markets_at_tick = []
-            for m in catalog_markets:
-                tok_ids = [str(t).strip() for t in (m.get("clob_token_ids") or []) if t]
-                if any(t in event_token_ids for t in tok_ids):
-                    markets_at_tick.append(m)
-        else:
-            if not prices_at_tick:
-                continue
-            markets_at_tick = []
-            for m in catalog_markets:
-                tok_ids = [str(t).strip() for t in (m.get("clob_token_ids") or []) if t]
-                if any(t in prices_at_tick for t in tok_ids):
-                    markets_at_tick.append(m)
-            if not markets_at_tick:
-                continue
-
-        # Call the strategy through the SAME entry point it uses LIVE.
-        #
-        # CRYPTO_UPDATE strategies that override on_event fire via
-        # ``on_event(event)`` live — their ``detect()`` is never called by the
-        # live crypto dispatch — so replay them the same way, forwarding the
-        # binned DataEvent(CRYPTO_UPDATE) objects unchanged (they already carry
-        # the byte-identical ``payload["markets"]`` live saw).  No hydrate /
-        # market_models / prices arg: on_event reads everything from
-        # ``event.payload``, exactly as live.
-        #
-        # Everything else runs through detect_async/detect with the
-        # reconstructed (events, markets, prices): dict-shaped catalog markets
-        # are wrapped into Market models (every detect signature in the repo
-        # annotates ``markets: list[Market]``), and for scanner_tick the
-        # embedded ``events`` are unwrapped into Event models so detect() sees
-        # the same shape live delivers (empty when the snapshot carried no event
-        # context — the strategy then classifies from market text alone, exactly
-        # as live does when the catalog refresh has no events array).
-        ticks_dispatched += 1
-        try:
-            if dispatch_via_on_event:
-                opps_at_tick = await _run_on_event_once(
-                    strategy,
-                    events_at_tick,
-                    timeout_seconds=8.0,
-                    now_us=int(tick_t.timestamp() * 1_000_000),
-                    books=prices_at_tick or None,
-                )
+                markets_by_id: dict[str, dict] = {}
+                for ev in events_at_tick:
+                    payload = getattr(ev, "payload", None) or (ev if isinstance(ev, dict) else {})
+                    if not isinstance(payload, dict):
+                        continue
+                    for m in (payload.get("markets") or []):
+                        if isinstance(m, dict):
+                            key = str(m.get("id") or m.get("condition_id") or m.get("slug") or "")
+                            if key:
+                                markets_by_id[key] = m
+                markets_at_tick: list[dict] = list(markets_by_id.values())
+            elif event_kind == "scanner_tick":
+                # Recorded catalog-snapshot replay — each
+                # polymarket.catalog.snapshot envelope projects to a
+                # MARKET_DATA_REFRESH DataEvent carrying the full catalog at
+                # refresh time.  Carry that catalog forward across ticks until
+                # a fresher snapshot arrives (refresh cadence is minutes;
+                # tick cadence is seconds).  Per-tick prices come from the
+                # parquet book grid (live_ingestor) — we augment each market
+                # dict with the current best_bid/best_ask so the strategy
+                # sees fresh top-of-book on every tick.
+                for ev in events_at_tick:
+                    for m in (getattr(ev, "markets", None) or []):
+                        if isinstance(m, dict):
+                            key = str(m.get("id") or m.get("condition_id") or m.get("slug") or "")
+                            if key:
+                                carry_catalog_markets[key] = m
+                    # Carry the recorded per-token book (the live ``prices`` arg)
+                    # forward, latest-wins per token — the live shared price cache.
+                    # The catalog-snapshot tee records exactly the book live's
+                    # detect() saw (the live scanner mutates the markets with fresh
+                    # WS book AND passes the same book as the prices arg).
+                    ev_prices = getattr(ev, "prices", None)
+                    if isinstance(ev_prices, dict):
+                        for tid, book in ev_prices.items():
+                            if isinstance(book, dict):
+                                carry_catalog_prices[str(tid)] = book
+                if not carry_catalog_markets:
+                    # Pre-recording window — no catalog snapshot seen yet.
+                    continue
+                # The recorded catalog markets already carry their live top-of-book
+                # (the live scanner mutates them via _apply_live_prices_to_markets
+                # before publishing, so the tee captured best_bid/ask), and the
+                # carried ``prices`` arg below carries the same book in
+                # {token_id: book} form.  Pass BOTH through AS-IS — no
+                # reconstruction — so detect() sees byte-identical (markets, prices)
+                # to live.  (The book-driven price grid is intentionally not built
+                # for event-driven strategies, so there is nothing to augment from.)
+                markets_at_tick = list(carry_catalog_markets.values())
+                prices_at_tick = dict(carry_catalog_prices)
+            elif event_kind is not None:
+                if not events_at_tick:
+                    continue
+                event_token_ids: set[str] = set()
+                for item in events_at_tick:
+                    if isinstance(item, dict):
+                        market_meta = item.get("market") or {}
+                        if isinstance(market_meta, dict):
+                            tid = str(market_meta.get("token_id") or "").strip()
+                            if tid:
+                                event_token_ids.add(tid)
+                markets_at_tick = []
+                for m in catalog_markets:
+                    tok_ids = [str(t).strip() for t in (m.get("clob_token_ids") or []) if t]
+                    if any(t in event_token_ids for t in tok_ids):
+                        markets_at_tick.append(m)
             else:
-                try:
-                    from services.strategy_inputs import hydrate_markets
-                    market_models: list[Any] = hydrate_markets(markets_at_tick)
-                except Exception:
-                    market_models = list(markets_at_tick)
+                if not prices_at_tick:
+                    continue
+                markets_at_tick = []
+                for m in catalog_markets:
+                    tok_ids = [str(t).strip() for t in (m.get("clob_token_ids") or []) if t]
+                    if any(t in prices_at_tick for t in tok_ids):
+                        markets_at_tick.append(m)
+                if not markets_at_tick:
+                    continue
 
-                events_for_detect: list[Any] = events_at_tick
-                if event_kind == "scanner_tick":
+            # Call the strategy through the SAME entry point it uses LIVE.
+            #
+            # CRYPTO_UPDATE strategies that override on_event fire via
+            # ``on_event(event)`` live — their ``detect()`` is never called by the
+            # live crypto dispatch — so replay them the same way, forwarding the
+            # binned DataEvent(CRYPTO_UPDATE) objects unchanged (they already carry
+            # the byte-identical ``payload["markets"]`` live saw).  No hydrate /
+            # market_models / prices arg: on_event reads everything from
+            # ``event.payload``, exactly as live.
+            #
+            # Everything else runs through detect_async/detect with the
+            # reconstructed (events, markets, prices): dict-shaped catalog markets
+            # are wrapped into Market models (every detect signature in the repo
+            # annotates ``markets: list[Market]``), and for scanner_tick the
+            # embedded ``events`` are unwrapped into Event models so detect() sees
+            # the same shape live delivers (empty when the snapshot carried no event
+            # context — the strategy then classifies from market text alone, exactly
+            # as live does when the catalog refresh has no events array).
+            ticks_dispatched += 1
+            try:
+                if dispatch_via_on_event:
+                    opps_at_tick = await _run_on_event_once(
+                        strategy,
+                        events_at_tick,
+                        timeout_seconds=8.0,
+                        now_us=int(tick_t.timestamp() * 1_000_000),
+                        books=prices_at_tick or None,
+                    )
+                else:
                     try:
-                        from services.strategy_inputs import hydrate_events
-                        _raw: list[Any] = []
-                        for ev in events_at_tick:
-                            raw_events = getattr(ev, "events", None)
-                            if not raw_events:
-                                _pl = getattr(ev, "payload", None)
-                                raw_events = _pl.get("events") if isinstance(_pl, dict) else None
-                            _raw.extend(raw_events or [])
-                        events_for_detect = hydrate_events(_raw)
+                        from services.strategy_inputs import hydrate_markets
+                        market_models: list[Any] = hydrate_markets(markets_at_tick)
                     except Exception:
-                        events_for_detect = []
+                        market_models = list(markets_at_tick)
 
-                opps_at_tick = await _run_detect_once(
-                    strategy,
-                    events=events_for_detect,
-                    markets=market_models,
-                    prices=prices_at_tick,
-                    timeout_seconds=8.0,
-                    now_us=int(tick_t.timestamp() * 1_000_000),
-                    books=prices_at_tick or None,
-                )
-        except Exception as exc:
-            detect_failures += 1
-            if detect_failures == 1:
-                _first_detect_exc = exc
-                # Full traceback exactly once — this log line is the only
-                # path from "backtest returned 0 opps" to the strategy's
-                # root cause when the strategy code itself is buggy.
-                logger.error(
-                    "replay_discover: detect()/on_event() raised at tick %d/%d — "
-                    "later failures this run are counted, not re-logged",
-                    tick_i, n_ticks, exc_info=exc,
-                )
-            continue
+                    events_for_detect: list[Any] = events_at_tick
+                    if event_kind == "scanner_tick":
+                        try:
+                            from services.strategy_inputs import hydrate_events
+                            _raw: list[Any] = []
+                            for ev in events_at_tick:
+                                raw_events = getattr(ev, "events", None)
+                                if not raw_events:
+                                    _pl = getattr(ev, "payload", None)
+                                    raw_events = _pl.get("events") if isinstance(_pl, dict) else None
+                                _raw.extend(raw_events or [])
+                            events_for_detect = hydrate_events(_raw)
+                        except Exception:
+                            events_for_detect = []
 
-        # Warm-up tick: detect ran (state built up) but we don't emit its
-        # opportunities — only the measured window counts.
-        if tick_t < _emit_start:
-            continue
-
-        for opp in opps_at_tick or []:
-            # ``opp`` is whatever the strategy's detect returns — usually
-            # an Opportunity-like object with ``positions_to_take`` /
-            # ``total_cost`` / ``expected_roi`` etc.  Wrap in a synthetic
-            # OpportunityHistory-shaped record.
-            pdata = _opp_to_positions_data(opp)
-            if not pdata.get("positions_to_take"):
+                    opps_at_tick = await _run_detect_once(
+                        strategy,
+                        events=events_for_detect,
+                        markets=market_models,
+                        prices=prices_at_tick,
+                        timeout_seconds=8.0,
+                        now_us=int(tick_t.timestamp() * 1_000_000),
+                        books=prices_at_tick or None,
+                    )
+            except Exception as exc:
+                detect_failures += 1
+                if detect_failures == 1:
+                    _first_detect_exc = exc
+                    # Full traceback exactly once — this log line is the only
+                    # path from "backtest returned 0 opps" to the strategy's
+                    # root cause when the strategy code itself is buggy.
+                    logger.error(
+                        "replay_discover: detect()/on_event() raised at tick %d/%d — "
+                        "later failures this run are counted, not re-logged",
+                        tick_i, n_ticks, exc_info=exc,
+                    )
                 continue
-            detected_total.append(
-                _SyntheticOpp(
-                    strategy_type=slug,
-                    detected_at=tick_t,
-                    positions_data=pdata,
-                    title=str(getattr(opp, "title", "") or ""),
-                    event_id=str(getattr(opp, "event_id", "") or "") or None,
+
+            # Warm-up tick: detect ran (state built up) but we don't emit its
+            # opportunities — only the measured window counts.
+            if tick_t < _emit_start:
+                continue
+
+            for opp in opps_at_tick or []:
+                # ``opp`` is whatever the strategy's detect returns — usually
+                # an Opportunity-like object with ``positions_to_take`` /
+                # ``total_cost`` / ``expected_roi`` etc.  Wrap in a synthetic
+                # OpportunityHistory-shaped record.
+                pdata = _opp_to_positions_data(opp)
+                if not pdata.get("positions_to_take"):
+                    continue
+                detected_total.append(
+                    _SyntheticOpp(
+                        strategy_type=slug,
+                        detected_at=tick_t,
+                        positions_data=pdata,
+                        title=str(getattr(opp, "title", "") or ""),
+                        event_id=str(getattr(opp, "event_id", "") or "") or None,
+                    )
                 )
-            )
+    finally:
+        if projected_catalog_events is not None:
+            await projected_catalog_events.aclose()
 
     if detect_failures > 0:
         logger.warning(
