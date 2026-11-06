@@ -22,18 +22,14 @@ parallel with the legacy readers (no behavior change).
 """
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
-from typing import AsyncIterator, Iterable, Optional
+from typing import AsyncIterator, Iterable, Iterator, Optional
 
 from services.marketdata.asof import AsOfSeries
 from services.marketdata.book import BookSnapshot, load_book_series, us_from_dt
 from services.marketdata.coverage import CoverageMap, resolve_coverage
 from services.marketdata.manifest import DatasetSnapshot, SnapshotEntry, build_snapshot
 from services.marketdata.merge import ordered_merge
-
-logger = logging.getLogger(__name__)
-
 
 class MarketDataView:
     """Point-in-time view over a fixed token universe + window.
@@ -151,17 +147,58 @@ class MarketDataView:
         self,
         token_ids: Optional[Iterable[str]] = None,
     ) -> AsyncIterator[BookSnapshot]:
-        """Yield BookSnapshots across tokens in global ascending order.
+        """Merge token histories, retaining only histories that overlap in time.
 
-        Merges per-token AsOfSeries via the single ordered-merge primitive so
-        the matcher sees a chronologically-correct cross-token stream.
+        Parquet timestamp minima are conservative activation bounds, including
+        for unsorted rows and files containing multiple tokens. Missing statistics
+        fall back to the window start, preserving ordering at the cost of memory.
         """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
         toks = [str(t) for t in token_ids] if token_ids is not None else list(self._coverage.covered_tokens)
-        series_list = [self._series_for(t) for t in toks]
-        # Each series exposes (ts_us, snap) in ascending order over the window.
-        per_token_streams = [s.iter_range(self._start_us, self._end_us) for s in series_list]
-        for _ts_us, snap in ordered_merge(per_token_streams, key=lambda pair: pair[0]):
-            yield snap
+        file_starts: dict[str, int] = {}
+
+        def token_stream(tok: str, first_us: int) -> Iterator[tuple[int, Optional[BookSnapshot]]]:
+            # Priming the merge must not materialize a future token's history.
+            yield first_us, None
+            try:
+                series = self._series_for(tok)
+                yield from series.iter_range(self._start_us, self._end_us)
+            finally:
+                self.release_tokens([tok])
+
+        streams = []
+        for tok in toks:
+            bounds = []
+            for path in self._coverage.files_for(tok):
+                if path not in file_starts:
+                    first_us = self._start_us
+                    try:
+                        metadata = pq.read_metadata(path)
+                        if "observed_at_us" in metadata.schema.names:
+                            column = metadata.schema.names.index("observed_at_us")
+                            minima = []
+                            for group in range(metadata.num_row_groups):
+                                stats = metadata.row_group(group).column(column).statistics
+                                if stats is None or not stats.has_min_max:
+                                    minima.append(self._start_us)
+                                else:
+                                    minima.append(int(stats.min))
+                            first_us = max(self._start_us, min(minima, default=self._start_us))
+                    except (OSError, pa.ArrowException):
+                        # The canonical loader reports unreadable files on access.
+                        first_us = self._start_us
+                    file_starts[path] = first_us
+                bounds.append(file_starts[path])
+            streams.append(token_stream(tok, min(bounds, default=self._start_us)))
+        try:
+            for _, snapshot in ordered_merge(streams, key=lambda pair: pair[0]):
+                if snapshot is not None:
+                    yield snapshot
+        finally:
+            for stream in streams:
+                stream.close()
 
     # ── introspection ──────────────────────────────────────────────────
     @property

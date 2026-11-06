@@ -13,6 +13,7 @@ row -> BookSnapshot conversion (``marketdata.book.row_to_book_snapshot``).
 """
 from __future__ import annotations
 
+from contextlib import aclosing
 from datetime import datetime
 from typing import AsyncIterator, Iterable, Optional
 
@@ -37,8 +38,9 @@ class MarketDataViewSource:
         return await self._view.book_at(token_id, ts)
 
     async def iter_snapshots(self) -> AsyncIterator[BookSnapshot]:
-        async for snap in self._view.iter_books(self._tokens):
-            yield snap
+        async with aclosing(self._view.iter_books(self._tokens)) as stream:
+            async for snap in stream:
+                yield snap
 
 
 __all__ = ["MarketDataViewSource"]
