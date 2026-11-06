@@ -6,11 +6,19 @@
 
 两天历史样本已通过 192/192 完整配对窗口验证。31 天冻结范围为 2026-10-04 00:00 至 2026-11-04 00:00 UTC；完整配对 2,920 个、质量不完整排除 16 个、供应商目录缺失 40 个。原始数据继续保留在 `data/parquet`，容器挂载 `/app/data/parquet`。
 
-原生盘口、历史时钟与重复退出修复已推送到 `origin/codex/backtest-quote-fidelity`，对应提交 `65035185`、`5b6ef52d`、`8b7b8caf`。Compose 通过独立 `worker-jobs` 服务执行既有导入和回测任务，与后端共享 Parquet 挂载。全局 autoresearch 仍为 `interval_seconds=0`、`auto_apply=false`，其他交易员和真实交易不启动。
+原生盘口、历史时钟与重复退出修复，以及独立 Docker jobs worker 和共享 Parquet 配置，均已合并并推送到 GitHub `main`，截至本次核对为 `33d6d5f2`。旧分支已按用户要求从本地和 GitHub 删除；后续交付使用现有 `main`。
 
-本轮固定一个假设、两个候选。A 因原生接口合同失败退役，当前按冻结 B 计划串行进行 0.5/1/2 秒延迟开发集回测。已完成全部三个延迟核对的范围为 52 个独立完整窗口、13 小时、31 个信号窗口；重复延迟不增加独立样本。尚未达到 48 小时、192 个完整窗口、50 个独立可评估信号的研究门槛。实际成交账本中的未卖出余仓、费用和拒单必须保留；原生估值或结算关闭不能冒充真实可执行卖出收益。10 月 26 日起保留集信号未访问，shadow 尚未启动。
+本轮固定一个假设、两个候选。A 因原生接口合同失败退役，B 源码与规则保持冻结。过去独立六小时回测仅作机制诊断，不能把重置过资金与持仓的结果拼成连续收益。现改为 2026-10-05 00:00 至 10-07 12:00 UTC 的连续 60 小时基线：240 个完整窗口、960 个 token，同一运行内资金、持仓和风险状态延续；判断间隔 0.125 秒，共 1,728,000 个采样 tick。同一时间范围的 0.5/1/2 秒提交及取消延迟依次串行测试。选择时间范围依据已验证样本及时间顺序，没有按收益筛选。
 
-续接以 `output/research/btc_eth_15m/provider_research_state.json`、`provider_import/status.json`、`round_001_candidate_b_execution_plan.json` 和 `journal.md` 中的现有任务 ID 为准。下面的日期段落保留阶段记录，其中的旧任务 ID 不应重复提交。原始数据、完整收据和研究输出按现有 `.gitignore` 保存在本地；本说明与部署配置纳入版本控制。
+这次 60 小时基线不代表完成整个 22 天开发期或 31 天历史。当前 API 的 2,000,000 tick 上限不足以对全时段保持 125 毫秒判断频率；现有引擎会自动降低过长范围的频率。该能力限制尚待解决，不得以降频、绕过上限或拼接重置账户宣称完成全时段验证。数据量门槛为至少 48 小时、192 个完整窗口、50 个独立可评估信号，重复延迟不增加独立样本；达到数量门槛也不代表盈利成立。
+
+执行采用 Codex 自动研究与监督、现有 Docker jobs worker 持久回测相结合。原有 `btc-eth-15` 定时任务已更新为每 15 分钟续接研究：检查已有任务，完成结果核对后自动推进下一延迟，并作研究判断；普通运行进度不通知。全局 autoresearch 保持 `interval_seconds=0`、`auto_apply=false`，真实交易与其他交易员不启动。
+
+系统 AI 页面新增专用 `BTC ETH 15m Research` 分析员（ID `f383a67677b14b02`），只允许 `query_database` 与 `get_system_status`，用于按任务 ID 读取证据、审查费用和余仓。首次会话 `b6ede1d922994b8d` 被已有全局暂停拦截：`Global pause is active; LLM requests are disabled.`，没有模型消耗或工具执行。当前研究分析由 Codex 继续承担；不得为该分析员解除其他后台服务的暂停，也不得声称内嵌 AI 已实际接管。通用内嵌回测工具当前使用相对最近日期，未传本实验所需的固定数据范围和采样参数，不能直接替代本实验的原生排队请求。
+
+所有结果必须按实际 BUY/SELL、手续费、现金、余仓与无真实卖出的估值 credit 核对。期末估值或结算关闭不能冒充可执行卖出收益。10 月 26 日起的保留集信号继续封存；开发及最终验证通过之前不启动 shadow。
+
+操作续接以 `output/research/btc_eth_15m/provider_research_state.json`、`provider_import/status.json`、`round_001_continuous_execution_plan.json`、`embedded_research_agent.json`、`autonomous_research_setup_latest.json` 和 `journal.md` 为准，复用已有任务 ID。旧 `round_001_candidate_b_execution_plan.json` 已标为被连续计划取代，禁止继续其独立短时片提交。原始数据、请求和完整收据继续按现有 `.gitignore` 本地保留。下面的日期段落保留阶段记录，旧任务不重复提交。
 
 ## 研究范围
 
