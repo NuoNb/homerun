@@ -15,8 +15,8 @@
 #   docker compose build
 #   docker compose up -d
 #
-# Worker plane split is load-bearing — don't collapse the three worker
-# services into one.  See gui.py:233 and backend/workers/host.py for
+# Worker plane split is load-bearing — keep jobs, trading, news, and
+# discovery in separate services.  See gui.py:233 and backend/workers/host.py for
 # why running the trading plane twice would double-connect the
 # Polymarket WS user channel and get both sessions dropped.
 
@@ -47,6 +47,7 @@ x-backend-volumes: &backend-volumes
   - ./data/cache:/app/data/cache
   - ./data/runtime:/app/data/runtime
   - ./data/machine_learning:/app/data/machine_learning
+  - ./data/parquet:/app/data/parquet
 
 services:
   # ---------------------------------------------------------------------
@@ -241,9 +242,23 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------
-  # Worker planes — three separate services on purpose.  See gui.py:233.
+  # Worker planes — separate services for jobs, trading, news, and discovery.
   # Each plane runs ``python -m workers.host <plane>``.
   # ---------------------------------------------------------------------
+  worker-jobs:
+    <<: *backend-image
+    container_name: homerun-worker-jobs
+    command: ["python", "-m", "workers.host", "jobs"]
+    environment:
+      <<: *backend-env
+      HOMERUN_PROCESS_ROLE: worker
+      HOMERUN_WORKER_PLANE: jobs
+    volumes: *backend-volumes
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
   worker-trading:
     <<: *backend-image
     container_name: homerun-worker-trading
